@@ -14,7 +14,7 @@ enum Command {
 
 struct Model {
     sender: Sender<Command>,
-    toggle: u32,
+    playing: bool,
 }
 
 fn main() {
@@ -25,16 +25,17 @@ fn model(app: &App) -> Model {
     app.new_window().key_pressed(key_pressed).view(view).build().unwrap();
 
     let (sender, receiver) = mpsc::channel::<Command>();
-    let audio_thread = thread::spawn(move || audio_control_thread(receiver));
+    thread::spawn(|| audio_control_thread(receiver));
     println!("Audio thread spawned");
 
-    Model { sender, toggle: 0 }
+    Model { sender, playing: false }
 }
 
+#[allow(unused_variables)]
 fn key_pressed(app: &App, model: &mut Model, key: Key) {
     if key == Key::Space {
-        model.toggle ^= 1;  // Toggle the state between 0 and 1
-        if model.toggle == 0 {
+        model.playing = !model.playing;
+        if model.playing == false {
             println!("Sending Play command");
             model.sender.send(Command::Play).unwrap();
         } else {
