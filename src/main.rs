@@ -16,7 +16,7 @@ enum Command {
 
 struct Model {
     sender: Sender<Command>,
-    toggle: u32,
+    playing: bool,
     playback_position: Arc<Mutex<Duration>>,
 }
 
@@ -31,14 +31,15 @@ fn model(app: &App) -> Model {
     let playback_position_clone = Arc::clone(&playback_position);
     thread::spawn(move || audio_control_thread(receiver, playback_position_clone));
     println!("Audio thread spawned");
-    Model { sender, toggle: 0, playback_position }
+    Model { sender, playing: false, playback_position }
 }
+
 
 fn key_pressed(_app: &App, model: &mut Model, key: Key) {
     match key {
         Key::Space => {
-            model.toggle ^= 1;  // Toggle the state between 0 and 1
-            let cmd = if model.toggle == 0 { Command::Play } else { Command::Pause };
+            model.playing = !model.playing;
+            let cmd = if model.playing == false { Command::Play } else { Command::Pause };
             model.sender.send(cmd).unwrap();
         },
         Key::Left => {
