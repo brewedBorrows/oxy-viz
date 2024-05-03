@@ -105,6 +105,16 @@ fn audio_control_thread(receiver: Receiver<Command>, playback_position: Arc<Mute
     }
 }
 
-fn view(_app: &App, _model: &Model, frame: Frame) {
-    frame.clear(DIMGRAY);
+fn view(app: &App, model: &Model, frame: Frame) {
+
+    let draw = app.draw();
+    draw.background().color(CORNFLOWERBLUE);
+    let win = app.window_rect();
+    draw.ellipse()
+        .x_y(app.mouse.x, app.mouse.y)
+        .radius(win.w()*0.125)
+        .color(RED);
+    draw.to_frame(app, &frame).unwrap();
+    draw.reset();
+
 }
