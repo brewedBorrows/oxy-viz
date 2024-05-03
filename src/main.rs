@@ -1,20 +1,23 @@
 use std::fs::File;
 use std::io::BufReader;
-use std::sync::{Arc, Mutex};
 use std::thread;
 use std::sync::mpsc::{self, Sender, Receiver};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 use rodio::{Decoder, OutputStream, Sink, Source};
 use nannou::prelude::*;
 
 enum Command {
     Play,
     Pause,
-    Stop,
+    Stop, // will use later
+    Seek(Duration),
 }
 
 struct Model {
     sender: Sender<Command>,
     toggle: u32,
+    playback_position: Arc<Mutex<Duration>>,
 }
 
 fn main() {
@@ -23,43 +26,64 @@ fn main() {
 
 fn model(app: &App) -> Model {
     app.new_window().key_pressed(key_pressed).view(view).build().unwrap();
-
     let (sender, receiver) = mpsc::channel::<Command>();
-    let audio_thread = thread::spawn(move || audio_control_thread(receiver));
+    let playback_position = Arc::new(Mutex::new(Duration::from_secs(0)));
+    let playback_position_clone = Arc::clone(&playback_position);
+    thread::spawn(move || audio_control_thread(receiver, playback_position_clone));
     println!("Audio thread spawned");
-
-    Model { sender, toggle: 0 }
+    Model { sender, toggle: 0, playback_position }
 }
 
-fn key_pressed(app: &App, model: &mut Model, key: Key) {
-    if key == Key::Space {
-        model.toggle ^= 1;  // Toggle the state between 0 and 1
-        if model.toggle == 0 {
-            println!("Sending Play command");
-            model.sender.send(Command::Play).unwrap();
-        } else {
-            println!("Sending Pause command");
-            model.sender.send(Command::Pause).unwrap();
-        }
+fn key_pressed(_app: &App, model: &mut Model, key: Key) {
+    match key {
+        Key::Space => {
+            model.toggle ^= 1;  // Toggle the state between 0 and 1
+            let cmd = if model.toggle == 0 { Command::Play } else { Command::Pause };
+            model.sender.send(cmd).unwrap();
+        },
+        Key::Left => {
+            println!("Left arrow key pressed");
+            let lock = model.playback_position.lock().unwrap();//locked the variable here for mutex, 
+            let new_position = if *lock > Duration::from_secs(5) {
+                *lock - Duration::from_secs(5)
+            } else {
+                Duration::from_secs(0)
+            };
+            model.sender.send(Command::Seek(new_position)).unwrap(); // passing the timestamp to audio thread
+        },
+        Key::Right => {
+            println!("Right arrow key pressed");
+            let lock = model.playback_position.lock().unwrap();//locked the variable here for mutex,  and blah blah blah
+            let new_position = *lock + Duration::from_secs(5);
+            model.sender.send(Command::Seek(new_position)).unwrap(); // passing the timestamp to audio thread
+        },
+        _ => {}
     }
 }
 
-fn audio_control_thread(receiver: Receiver<Command>) {
-    let file = File::open("src/test.mp3").expect("failed to open audio file");
+
+fn audio_control_thread(receiver: Receiver<Command>, playback_position: Arc<Mutex<Duration>>) {
+    let file = File::open("src/test.mp3").expect("Failed to open audio file");
     let file = BufReader::new(file);
-    let decoder = Decoder::new(file).expect("failed to decode audio file");
-    let source = decoder.convert_samples::<i16>().amplify(0.25); 
+    let decoder = Decoder::new(file).expect("Failed to decode audio file");
+    let source = decoder.convert_samples::<i16>().amplify(0.25);
     let (_stream, stream_handle) = OutputStream::try_default().unwrap();
     let sink = Sink::try_new(&stream_handle).unwrap();
     sink.append(source);
+
+    let mut last_play_time = Instant::now();
+
     for command in receiver {
         match command {
             Command::Play => {
                 println!("Playing audio");
                 sink.play();
+                last_play_time = Instant::now();
             },
             Command::Pause => {
                 println!("Pausing audio");
+                let elapsed = last_play_time.elapsed();
+                *playback_position.lock().unwrap() += elapsed;
                 sink.pause();
             },
             Command::Stop => {
@@ -67,10 +91,19 @@ fn audio_control_thread(receiver: Receiver<Command>) {
                 sink.stop();
                 break;
             },
+            Command::Seek(position) => {
+                println!("Seeking audio to {:?}", position);
+                if let Err(e) = sink.try_seek(position) {
+                    eprintln!("Failed to seek: {}", e);
+                } else {
+                    *playback_position.lock().unwrap() = position;
+                    sink.play();
+                }
+            }
         }
     }
 }
 
-fn view(app: &App, model: &Model, frame: Frame) {
+fn view(_app: &App, _model: &Model, frame: Frame) {
     frame.clear(DIMGRAY);
 }
