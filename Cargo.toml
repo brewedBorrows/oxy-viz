@@ -8,5 +8,16 @@ edition = "2021"
 [dependencies]
 nannou = "0.19"
 lofty = "0.19.2"
+rustfft = "6.0"
 rodio = {git = "https://github.com/RustAudio/rodio.git"}
+nannou_audio =  { path = "./nannou_audio" }
+minimp3 =  "0.5" 
+plotters = "0.3"
+wav = "0.1.1"
+
+[[bin]]
+path = "src/main.rs"
+name = "audio-visualizer"
+
+
 
