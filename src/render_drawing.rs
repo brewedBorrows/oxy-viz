@@ -209,7 +209,7 @@ impl CircleWave {
         // working in r, theta coordinates
         let num_points = &norm_octave.len();
         let mut theta_list = (0..*num_points).map(|i| (i as f32) * TAU / (*num_points as f32));
-        let mut r_list = norm_octave.into_iter().map(|amp| amp * max_amp + radius);
+        let mut r_list = norm_octave.into_iter().map(|amp| amp * 185.377700 + radius);
 
         let points: Vec<PointPolar> = (0..*num_points)
             .map(|_| PointPolar {
@@ -232,7 +232,7 @@ impl DrawVisual for CircleWave {
 
         // get list of spline_curve_samples from spline_generator
         let spline_samples = spline.generate_samples(config.num_samples);
-        println!("--spline_samples: {:?}", spline_samples);
+        // println!("--spline_samples: {:?}", spline_samples);
 
         // draw polyline from spline_curve_samples
         draw.polyline()
@@ -296,7 +296,7 @@ pub fn draw_on_window(app: &App, frame: Frame, data: &Data) {
     draw.background().color(CORNFLOWERBLUE);
     let win = app.window_rect();
 
-    let radii = data.octaves.iter().map(|_| win.w() / 8.0).collect();
+    let radii = data.octaves.iter().enumerate().map(|(i, _)| win.w() / 8.0 + i as f32 * 50.).collect();
     let max_amps = data.octaves.iter().map(|_| win.w() / 16.0).collect();
     CircleWaveMultiple::new(&data, radii, max_amps).draw_visual(
         &draw,

@@ -1,5 +1,6 @@
 use minimp3::{Decoder as MiniDecoder, Frame as miniFrame};
 use nannou::prelude::*;
+use nannou::text::pt_to_scale;
 use rodio::{Decoder, OutputStream, Sink, Source};
 use rustfft::num_complex::Complex;
 use rustfft::FftPlanner;
@@ -23,22 +24,20 @@ enum Command {
 struct Playback {
     is_playing: bool,
     curr_pos: Arc<Mutex<Duration>>,
+    fft_output: Arc<Mutex<Vec<Complex<f32>>>>,
 }
+
 struct Model {
     sender: Sender<Command>,
     playback: Playback,
     data: render_drawing::Data,
+    temp: u128,
 }
-pub struct Audio {
-    pub sounds: Vec<BufReader<File>>,
-    pub volume_sender: std::sync::mpsc::Sender<f32>,
-    pub volume: Arc<Mutex<f32>>,
-    pub fft_output: Arc<Mutex<Vec<Complex<f32>>>>,
+fn main() {
+    nannou::app(model).update(update).run();
 }
 
-fn main() {
-    nannou::app(model).run();
-}
+const SRC : &str = "src/test.mp3";
 
 fn model(app: &App) -> Model {
     println!("i am in model");
@@ -49,33 +48,31 @@ fn model(app: &App) -> Model {
         .unwrap();
 
     let fft_output: Arc<Mutex<Vec<Complex<f32>>>> = Arc::new(Mutex::new(vec![]));
-    let (volume_sender, _volume_receiver) = channel();
-    let volume: Arc<Mutex<f32>> = Arc::new(Mutex::new(0.0));
 
     let (sender, receiver) = mpsc::channel::<Command>();
     let playback_position = Arc::new(Mutex::new(Duration::from_secs(0)));
 
     let playback_position_clone = Arc::clone(&playback_position);
-    let audio_model = Audio {
-        sounds: vec![],
-        volume_sender,
-        fft_output: Arc::clone(&fft_output),
-        volume: Arc::clone(&volume),
-    };
+    let fft_output_clone = Arc::clone(&fft_output);
 
     println!("this is just before stream play");
-    thread::spawn(move || audio_control_thread(receiver, playback_position_clone));
+    thread::spawn(move || {
+        audio_control_thread(receiver, playback_position_clone, fft_output_clone)
+    });
     println!("Audio thread spawned");
 
     // gen random data for testing
     let random_data = render_drawing::Data::create_random_data();
+    let temp = 0;
     println!("--data: {:?}", random_data);
     Model {
         sender,
         playback: Playback {
             is_playing: false,
             curr_pos: playback_position,
+            fft_output,
         },
+        temp,
         data: random_data,
     }
 }
@@ -113,20 +110,42 @@ fn key_pressed(_app: &App, model: &mut Model, key: Key) {
         _ => {}
     }
 }
-fn display_frequencies(buffer: &[Complex<f32>], sample_rate: usize, fft_size: usize) {
+
+fn display_frequencies(
+    buffer: &[Complex<f32>],
+    sample_rate: usize,
+    fft_size: usize,
+    fft_output: Arc<Mutex<Vec<Complex<f32>>>>
+)   {
     let target_notes = generate_note_frequencies(4); // Generate frequencies for 4 octaves
+    assert!(target_notes.len() == 48, "Expected 48 target notes");
+
+    let mut output = fft_output.lock().expect("Mutex was poisoned").to_vec();
+
+    // Clear previous results
+    output.clear();
+
+    for freq in &target_notes {
+        let freq_magnitude_complex = Complex::new(*freq, 0.0);
+        output.push(freq_magnitude_complex);
+    }
 
     for (i, complex) in buffer.iter().enumerate() {
         let frequency = (i as f32 * sample_rate as f32) / fft_size as f32;
         let magnitude = complex.norm();
-        // Check if the frequency is close to any target note frequencies
-        if target_notes.iter().any(|&n| (frequency - n).abs() < 1.0) && magnitude > 1.0 {
-            println!(
-                "Frequency: {:.2} Hz, Magnitude: {:.4}",
-                frequency, magnitude
-            );
+        for freq_magnitude in output.iter_mut() {
+            if (frequency - freq_magnitude.re).abs() < 1.0 && magnitude > 1.0 {
+                // Update the magnitude if the condition is met
+                freq_magnitude.im = magnitude;
+                break;  // Stop checking once the first match is found and updated
+            }
         }
     }
+
+    // println!("--output: {:?}", output);
+
+    assert!(output.len() == 48, "Expected 48 output values after processing");
+    *fft_output.lock().unwrap() = output;
 }
 
 fn generate_note_frequencies(octaves: usize) -> Vec<f32> {
@@ -142,10 +161,14 @@ fn generate_note_frequencies(octaves: usize) -> Vec<f32> {
     frequencies
 }
 
-fn audio_control_thread(receiver: Receiver<Command>, playback_position: Arc<Mutex<Duration>>) {
+fn audio_control_thread(
+    receiver: Receiver<Command>,
+    playback_position: Arc<Mutex<Duration>>,
+    fft_output:Arc<Mutex<Vec<Complex<f32>>>>,
+) {
     println!("i am in audio_control_thread");
 
-    let file_path = "src/test.mp3";
+    let file_path = SRC;
     let file = File::open(file_path).expect("Failed to open audio file");
     let mut decoder = MiniDecoder::new(BufReader::new(file));
 
@@ -154,7 +177,7 @@ fn audio_control_thread(receiver: Receiver<Command>, playback_position: Arc<Mute
     while let Ok(miniFrame { data, .. }) = decoder.next_frame() {
         all_samples.extend(data);
     }
-    let file = File::open("src/test.mp3").expect("Failed to open audio file");
+    let file = File::open(SRC).expect("Failed to open audio file");
     let file = BufReader::new(file);
     let decoder = Decoder::new(file).expect("Failed to decode audio file");
     let source: rodio::source::Amplify<
@@ -176,12 +199,12 @@ fn audio_control_thread(receiver: Receiver<Command>, playback_position: Arc<Mute
     for command in receiver {
         match command {
             Command::CalculateFFT => {
-                println!("Calculating FFT");
-                let elapsed = last_play_time.elapsed();
-                let start_pos = elapsed;
+                // println!("Calculating FFT");
+                // let elapsed = last_play_time.elapsed();
+                let start_pos = *playback_position.lock().unwrap();
                 println!("will this be {:?}", start_pos);
                 let samples_offset = (start_pos.as_secs_f32() * sample_rate as f32) as usize;
-                println!("{:?}", start_pos);
+                // println!("{:?}", start_pos);
                 if samples_offset + window_size <= all_samples.len() {
                     let mut buffer: Vec<Complex<f32>> = all_samples
                         [samples_offset..samples_offset + window_size]
@@ -191,8 +214,8 @@ fn audio_control_thread(receiver: Receiver<Command>, playback_position: Arc<Mute
 
                     fft.process(&mut buffer); // Perform FFT in-place
 
-                    // Display the frequency and magnitude informationqqqqqqq
-                    display_frequencies(&buffer, sample_rate, window_size);
+                    // Display the frequency and magnitude information
+                    display_frequencies(&buffer, sample_rate, window_size, fft_output.clone()); 
                 } else {
                     println!(
                         "Not enough data available for FFT calculation at the current position."
@@ -223,10 +246,43 @@ fn audio_control_thread(receiver: Receiver<Command>, playback_position: Arc<Mute
     }
 }
 
+fn update(app: &App, model: &mut Model, event: Update) {
+    model.temp += event.since_last.as_millis();
+    if model.temp > 100 {
+        model.temp = 0;
+        println!("------ event called{:?}", event.since_last.as_secs_f32());
+        model.sender.send(Command::CalculateFFT).unwrap();
+    }
+    // update curr position
+    if !model.playback.is_playing {
+        let elapsed = event.since_last;
+        let mut lock = model.playback.curr_pos.lock().unwrap();
+        *lock += elapsed;
+    }
+}
+
 fn view(app: &App, model: &Model, frame: Frame) {
     // calulations for viz
     // let amp = calculation::calculate(&model.playback.is_playing);
 
-    // render
-    render_drawing::draw_on_window(app, frame, &model.data );
+
+    let x = model.playback.fft_output.lock().unwrap_or_else(|e| e.into_inner()).to_vec();
+    if x.len() < 48 {
+        return;
+    } else {
+        let octaves_flat: Vec<f32> = model.playback.fft_output.lock().unwrap_or_else(|e| e.into_inner()).to_vec()
+            [x.len() - 48..]
+            .iter()
+            .map(|x| x.im)
+            .collect();
+
+        let octaves: Vec<Vec<f32>> = octaves_flat.chunks(12).map(|x| x.to_vec()).collect();
+        // println!("--octaves: {:?}", octaves);
+        assert!(octaves.len() == 4, "Expected 4 octaves");
+
+        let data = render_drawing::Data::new(octaves);
+
+        // println!("--fft_output: {:?}", octaves_flat);
+        render_drawing::draw_on_window(app, frame, &data);
+    }
 }
