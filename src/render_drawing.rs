@@ -1,21 +1,6 @@
-use nannou::{
-    geom::{range, Range},
-    lyon::{
-        geom::{euclid::Point2D, Point},
-        path::Path,
-    },
-    prelude::*,
-};
-use nannou::{
-    lyon::{
-        geom::euclid::UnknownUnit,
-        path::{path::Builder, traits::PathBuilder, EndpointId},
-    },
-    prelude::*,
-};
+use nannou::prelude::*;
 use rand::Rng;
-
-use splines::{spline::SampledWithKey, Interpolation, Key, Spline};
+use splines::{Interpolation, Key, Spline};
 
 #[derive(Debug)]
 pub struct Data {
@@ -69,34 +54,6 @@ impl Data {
             .map(|amp| map_range(amp, min, max, 0., 1.))
             .collect()
     }
-}
-
-fn polar_to_cartesian(r: f32, theta: f32) -> Point2 {
-    Point2::new(r * theta.cos(), r * theta.sin())
-}
-
-fn draw_circle_wave(norm_octave: &Vec<f32>, win: Rect) -> Vec<Point2> {
-    /// Draws a circle wave from a normalized octave (12 floats, each between 0 and 1)
-    let RADIUS = win.w() / 4.0; // radius of circle
-    let AMP_IN = RADIUS * (-0.5); // lower bound of amplitude (outward distance from circumference of circle)
-    let AMP_OUT = RADIUS * 0.5; // upper bound of amplitude
-
-    // working in r, theta coordinates
-    let theta_list = (0..12).map(|i| (i as f32) * PI / 6.0);
-    let r_list = norm_octave.iter().map(|amp| {
-        map_range(*amp, 0.0, 1.0, AMP_IN, AMP_OUT) // map the amplitude to the range of AMP_IN to AMP_OUT
-    });
-
-    // convert r, theta to x, y
-    let points = r_list
-        .zip(theta_list)
-        .map(|(r, theta)| polar_to_cartesian(r + RADIUS, theta))
-        .collect::<Vec<Point2>>();
-
-    // convert points to closed bezier curve
-    println!("--points: {:?}", points);
-    println!("--win size: {:?}", win.w());
-    points.to_vec()
 }
 
 struct Spline2D {
@@ -341,7 +298,6 @@ pub fn draw_on_window(app: &App, frame: Frame, data: &Data) {
 
     let radii = data.octaves.iter().map(|_| win.w() / 8.0).collect();
     let max_amps = data.octaves.iter().map(|_| win.w() / 16.0).collect();
-
     CircleWaveMultiple::new(&data, radii, max_amps).draw_visual(
         &draw,
         win,
@@ -355,45 +311,3 @@ pub fn draw_on_window(app: &App, frame: Frame, data: &Data) {
 
     draw.to_frame(app, &frame).unwrap();
 }
-
-// pub fn draw_on_window(app: &App, frame: Frame, data: &Data) {
-//     let draw = app.draw();
-//     draw.background().color(CORNFLOWERBLUE);
-//     let win = app.window_rect();
-
-//     let mut octaves = &data.octaves;
-
-//     // normalize each amplitude in each octave from MIN to MAX
-//     // so that the waves stays within bounds
-//     // normalize();
-
-//     // for each octave, draw a circle wave
-
-//     let circle_points = draw_circle_wave(&octaves[0], win);
-//     println!("--circle_points LEN: {:?}", circle_points.len());
-//     // let c_copy = circle_points.clone();
-//     // let p = c_copy.iter().map(|p| Point2D::new(p.x, p.y)).collect::<Vec<Point2D<f32, UnknownUnit>>>();
-
-//     // draw.polyline().color(BLUE).stroke_weight(5.0).points(circle_points.clone());
-
-//     // feed circle_points to a spline_generator
-//     let NUM_SAMPLES = 400;
-//     let spline = Spline2D::new(circle_points);
-//     // println!("--spline X: {:?}", spline.x_spline);
-
-//     // get list of spline_curve_samples from spline_generator
-//     let spline_samples = spline.generate_samples(NUM_SAMPLES);
-//     println!("--spline_samples: {:?}", spline_samples);
-
-//     // draw polyline from spline_curve_samples
-//     draw.polyline()
-//         .color(RED)
-//         .stroke_weight(5.0)
-//         .points(spline_samples);
-
-//     draw.ellipse()
-//         .x_y(0 as f32, 0 as f32)
-//         .radius(win.w() * 0.0125)
-//         .color(RED);
-//     draw.to_frame(app, &frame).unwrap();
-// }
