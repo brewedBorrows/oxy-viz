@@ -9,4 +9,6 @@ edition = "2021"
 nannou = "0.19"
 lofty = "0.19.2"
 rodio = {git = "https://github.com/RustAudio/rodio.git"}
+rand = "0.8"
+splines = "4.3.1"
 

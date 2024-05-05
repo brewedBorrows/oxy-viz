@@ -25,6 +25,7 @@ struct Playback {
 struct Model {
     sender: Sender<Command>,
     playback: Playback,
+    data: render_drawing::Data,
 }
 
 fn main() {
@@ -42,13 +43,17 @@ fn model(app: &App) -> Model {
     let playback_position_clone = Arc::clone(&playback_position);
     thread::spawn(move || audio_control_thread(receiver, playback_position_clone));
     println!("Audio thread spawned");
-    
+
+    // gen random data for testing
+    let random_data = render_drawing::Data::create_random_data();
+    println!("--data: {:?}", random_data );
     Model {
         sender,
         playback: Playback {
             is_playing: false,
             curr_pos: playback_position,
         },
+        data: random_data,
     }
 }
 
@@ -127,8 +132,8 @@ fn audio_control_thread(receiver: Receiver<Command>, playback_position: Arc<Mute
 
 fn view(app: &App, model: &Model, frame: Frame) {
     // calulations for viz
-    let amp = calculation::calculate(&model.playback.is_playing);
+    // let amp = calculation::calculate(&model.playback.is_playing);
 
     // render
-    render_drawing::draw(app, frame, &render_drawing::Data { amp: amp.unwrap() });
+    render_drawing::draw_on_window(app, frame, &model.data );
 }
