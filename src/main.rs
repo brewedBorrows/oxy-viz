@@ -1,5 +1,7 @@
+use crate::ui::Button;
 use minimp3::{Decoder as MiniDecoder, Frame as miniFrame};
 use nannou::prelude::*;
+use nannou::state::mouse;
 use nannou::text::pt_to_scale;
 use rodio::{Decoder, OutputStream, Sink, Source};
 use rustfft::num_complex::Complex;
@@ -13,6 +15,7 @@ use std::time::{Duration, Instant};
 
 mod calculation;
 mod render_drawing;
+mod ui;
 
 enum Command {
     Play,
@@ -25,6 +28,7 @@ struct Playback {
     is_playing: bool,
     curr_pos: Arc<Mutex<Duration>>,
     fft_output: Arc<Mutex<Vec<Complex<f32>>>>,
+    fav_part:(f32,f32),
 }
 
 struct Model {
@@ -32,17 +36,20 @@ struct Model {
     playback: Playback,
     data: render_drawing::Data,
     temp: u128,
+    buttons: Vec<ui::Button>,
+
 }
 fn main() {
     nannou::app(model).update(update).run();
 }
 
-const SRC : &str = "src/test.mp3";
+const SRC: &str = "src/test.mp3";
 
 fn model(app: &App) -> Model {
     println!("i am in model");
     app.new_window()
         .key_pressed(key_pressed)
+        .event(mouse_event)
         .view(view)
         .build()
         .unwrap();
@@ -64,16 +71,61 @@ fn model(app: &App) -> Model {
     // gen random data for testing
     let random_data = render_drawing::Data::create_random_data();
     let temp = 0;
-    println!("--data: {:?}", random_data);
+    // println!("--data: {:?}", random_data);
+
+    let play_button = ui::Button::new(
+        ui::ButtonType::Play,
+        ui::BBox::new(0.0, 0.0, 500., 500.),
+        || {
+            println!("Play button clicked");
+        },
+    );
+
+    let buttons = vec![play_button];
+
     Model {
         sender,
         playback: Playback {
             is_playing: false,
             curr_pos: playback_position,
             fft_output,
+            fav_part:(0.0,0.0),
         },
         temp,
         data: random_data,
+        buttons,
+    }
+}
+
+fn mouse_event(app: &App, model: &mut Model, event: WindowEvent) {
+    // get mousex and mousey
+    let pos = app.mouse.position();
+    let (x, y) = (pos.x, pos.y);
+    for button in &model.buttons {
+        match button.buttonType {
+            ui::ButtonType::Play => {}
+        }
+    }
+    match event {
+        MousePressed(_button) => {
+            // println!("Mouse pressed at x: {}, y: {}", x, y);
+            let button_clicked_type = ui::check_button_click(x, y, &model.buttons);
+            if let Some(button_type) = button_clicked_type {
+                match button_type {
+                    ui::ButtonType::Play => {
+                        println!("Play button clicked");
+                        model.playback.is_playing = !model.playback.is_playing;
+                        let cmd = if model.playback.is_playing == false {
+                            Command::Play
+                        } else {
+                            Command::Pause
+                        };
+                        model.sender.send(cmd).unwrap();
+                    }
+                }
+            }
+        }
+        _ => {}
     }
 }
 
@@ -115,8 +167,8 @@ fn display_frequencies(
     buffer: &[Complex<f32>],
     sample_rate: usize,
     fft_size: usize,
-    fft_output: Arc<Mutex<Vec<Complex<f32>>>>
-)   {
+    fft_output: Arc<Mutex<Vec<Complex<f32>>>>,
+) {
     let target_notes = generate_note_frequencies(4); // Generate frequencies for 4 octaves
     assert!(target_notes.len() == 48, "Expected 48 target notes");
 
@@ -137,14 +189,17 @@ fn display_frequencies(
             if (frequency - freq_magnitude.re).abs() < 1.0 && magnitude > 1.0 {
                 // Update the magnitude if the condition is met
                 freq_magnitude.im = magnitude;
-                break;  // Stop checking once the first match is found and updated
+                break; // Stop checking once the first match is found and updated
             }
         }
     }
 
     // println!("--output: {:?}", output);
 
-    assert!(output.len() == 48, "Expected 48 output values after processing");
+    assert!(
+        output.len() == 48,
+        "Expected 48 output values after processing"
+    );
     *fft_output.lock().unwrap() = output;
 }
 
@@ -164,7 +219,7 @@ fn generate_note_frequencies(octaves: usize) -> Vec<f32> {
 fn audio_control_thread(
     receiver: Receiver<Command>,
     playback_position: Arc<Mutex<Duration>>,
-    fft_output:Arc<Mutex<Vec<Complex<f32>>>>,
+    fft_output: Arc<Mutex<Vec<Complex<f32>>>>,
 ) {
     println!("i am in audio_control_thread");
 
@@ -202,7 +257,7 @@ fn audio_control_thread(
                 // println!("Calculating FFT");
                 // let elapsed = last_play_time.elapsed();
                 let start_pos = *playback_position.lock().unwrap();
-                println!("will this be {:?}", start_pos);
+                // println!("will this be {:?}", start_pos);
                 let samples_offset = (start_pos.as_secs_f32() * sample_rate as f32) as usize;
                 // println!("{:?}", start_pos);
                 if samples_offset + window_size <= all_samples.len() {
@@ -215,7 +270,7 @@ fn audio_control_thread(
                     fft.process(&mut buffer); // Perform FFT in-place
 
                     // Display the frequency and magnitude information
-                    display_frequencies(&buffer, sample_rate, window_size, fft_output.clone()); 
+                    display_frequencies(&buffer, sample_rate, window_size, fft_output.clone());
                 } else {
                     println!(
                         "Not enough data available for FFT calculation at the current position."
@@ -250,7 +305,7 @@ fn update(app: &App, model: &mut Model, event: Update) {
     model.temp += event.since_last.as_millis();
     if model.temp > 100 {
         model.temp = 0;
-        println!("------ event called{:?}", event.since_last.as_secs_f32());
+        // println!("------ event called{:?}", event.since_last.as_secs_f32());
         model.sender.send(Command::CalculateFFT).unwrap();
     }
     // update curr position
@@ -265,13 +320,21 @@ fn view(app: &App, model: &Model, frame: Frame) {
     // calulations for viz
     // let amp = calculation::calculate(&model.playback.is_playing);
 
-
-    let x = model.playback.fft_output.lock().unwrap_or_else(|e| e.into_inner()).to_vec();
+    let x = model
+        .playback
+        .fft_output
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .to_vec();
     if x.len() < 48 {
         return;
     } else {
-        let octaves_flat: Vec<f32> = model.playback.fft_output.lock().unwrap_or_else(|e| e.into_inner()).to_vec()
-            [x.len() - 48..]
+        let octaves_flat: Vec<f32> = model
+            .playback
+            .fft_output
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .to_vec()[x.len() - 48..]
             .iter()
             .map(|x| x.im)
             .collect();
@@ -283,6 +346,6 @@ fn view(app: &App, model: &Model, frame: Frame) {
         let data = render_drawing::Data::new(octaves);
 
         // println!("--fft_output: {:?}", octaves_flat);
-        render_drawing::draw_on_window(app, frame, &data);
+        render_drawing::draw_on_window(app, frame, &data, &model.buttons);
     }
 }

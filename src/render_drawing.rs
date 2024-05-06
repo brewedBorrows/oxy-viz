@@ -2,6 +2,8 @@ use nannou::prelude::*;
 use rand::Rng;
 use splines::{Interpolation, Key, Spline};
 
+use crate::ui;
+
 #[derive(Debug)]
 pub struct Data {
     octaves: Vec<Vec<f32>>,
@@ -160,7 +162,7 @@ enum Visualization {
     CircleWaveMultiple(CircleWaveMultiple),
 }
 
-struct DrawConfig {
+pub struct DrawConfig {
     frame_rate: usize,
     color_scheme: String,
     resolution: usize,
@@ -187,7 +189,7 @@ struct CircleWaveMultiple {
     circle_waves: Vec<CircleWave>,
 }
 
-trait DrawVisual {
+pub trait DrawVisual {
     // this should manage no of samples etc right
     fn draw_visual(&self, draw: &Draw, win: Rect, config: &DrawConfig);
     fn scale_visual(&mut self, win: Rect);
@@ -291,22 +293,28 @@ impl DrawVisual for CircleWaveMultiple {
     }
 }
 
-pub fn draw_on_window(app: &App, frame: Frame, data: &Data) {
+pub fn draw_on_window(app: &App, frame: Frame, data: &Data, buttons: &Vec<ui::Button>) {
     let draw = app.draw();
     draw.background().color(CORNFLOWERBLUE);
     let win = app.window_rect();
 
     let radii = data.octaves.iter().enumerate().map(|(i, _)| win.w() / 8.0 + i as f32 * 50.).collect();
     let max_amps = data.octaves.iter().map(|_| win.w() / 16.0).collect();
+    let draw_config = DrawConfig {
+        frame_rate: 60,
+        color_scheme: "red".to_string(),
+        resolution: 200,
+        num_samples: 400,
+    };
     CircleWaveMultiple::new(&data, radii, max_amps).draw_visual(
         &draw,
         win,
-        &DrawConfig {
-            frame_rate: 60,
-            color_scheme: "red".to_string(),
-            resolution: 200,
-            num_samples: 400,
-        },
+        &draw_config,
+    );
+    ui::render_ui(&draw,
+        win,
+        &draw_config,
+        buttons,
     );
 
     draw.to_frame(app, &frame).unwrap();
