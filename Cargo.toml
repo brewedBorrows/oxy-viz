@@ -13,3 +13,5 @@ rodio = {git = "https://github.com/RustAudio/rodio.git"}
 rand = "0.8"
 splines = "4.3.1"
 minimp3 =  "0.5" 
+walkdir = "2.3"
+
