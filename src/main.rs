@@ -1,9 +1,10 @@
 use crate::ui::Button;
+use hound::{WavReader, WavSpec};
 use minimp3::{Decoder as MiniDecoder, Frame as miniFrame};
 use nannou::prelude::*;
 use nannou::state::mouse;
 use nannou::text::pt_to_scale;
-use rodio::{Decoder, OutputStream, Sink, Source};
+use rodio::{Decoder, OutputStream, Sink, Source, buffer::SamplesBuffer};
 use rustfft::num_complex::Complex;
 use rustfft::FftPlanner;
 use std::fs::File;
@@ -12,6 +13,7 @@ use std::sync::mpsc::{self, channel, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
+
 
 mod calculation;
 mod render_drawing;
@@ -28,7 +30,7 @@ struct Playback {
     is_playing: bool,
     curr_pos: Arc<Mutex<Duration>>,
     fft_output: Arc<Mutex<Vec<Complex<f32>>>>,
-    fav_part:(f32,f32),
+    fav_part: (f32, f32),
 }
 
 struct Model {
@@ -37,13 +39,12 @@ struct Model {
     data: render_drawing::Data,
     temp: u128,
     buttons: Vec<ui::Button>,
-
 }
 fn main() {
     nannou::app(model).update(update).run();
 }
 
-const SRC: &str = "src/test.mp3";
+const SRC: &str = "src/test.wav";
 
 fn model(app: &App) -> Model {
     println!("i am in model");
@@ -89,7 +90,7 @@ fn model(app: &App) -> Model {
             is_playing: false,
             curr_pos: playback_position,
             fft_output,
-            fav_part:(0.0,0.0),
+            fav_part: (0.0, 0.0),
         },
         temp,
         data: random_data,
@@ -224,42 +225,36 @@ fn audio_control_thread(
     println!("i am in audio_control_thread");
 
     let file_path = SRC;
-    let file = File::open(file_path).expect("Failed to open audio file");
-    let mut decoder = MiniDecoder::new(BufReader::new(file));
+    let mut reader = WavReader::open(file_path).expect("Failed to open WAV file");
+    let spec = reader.spec();
 
     // Decode entire file into memory
-    let mut all_samples = Vec::new();
-    while let Ok(miniFrame { data, .. }) = decoder.next_frame() {
-        all_samples.extend(data);
-    }
-    let file = File::open(SRC).expect("Failed to open audio file");
-    let file = BufReader::new(file);
-    let decoder = Decoder::new(file).expect("Failed to decode audio file");
-    let source: rodio::source::Amplify<
-        rodio::source::SamplesConverter<Decoder<BufReader<File>>, i16>,
-    > = decoder.convert_samples::<i16>().amplify(0.25);
-    let sample_rate = 44100;
-    let channels = 2;
-    let window_size = (0.5 * sample_rate as f32) as usize * channels;
+    let all_samples: Vec<i16> = reader.samples::<i16>().filter_map(Result::ok).collect();
+
+    let sample_rate = spec.sample_rate as usize;
+    let channels = spec.channels as usize;
+    let window_size = ( sample_rate as f32) as usize; 
 
     let mut planner = FftPlanner::new();
     let fft = planner.plan_fft_forward(window_size);
 
     let (_stream, stream_handle) = OutputStream::try_default().unwrap();
     let sink = Sink::try_new(&stream_handle).unwrap();
-    sink.append(source);
+    // Convert all_samples to a SamplesBuffer which acts as a Source
+    let samples_buffer = SamplesBuffer::new(2, sample_rate as u32, all_samples.clone());
+    sink.append(samples_buffer);
 
     let last_play_time = Instant::now();
 
     for command in receiver {
         match command {
             Command::CalculateFFT => {
-                // println!("Calculating FFT");
-                // let elapsed = last_play_time.elapsed();
+                // FFT calculation logic remains the same
                 let start_pos = *playback_position.lock().unwrap();
-                // println!("will this be {:?}", start_pos);
                 let samples_offset = (start_pos.as_secs_f32() * sample_rate as f32) as usize;
-                // println!("{:?}", start_pos);
+
+                println!("Calculating FFT for sample_offset+window_size: {:?}", samples_offset+window_size);
+                println!("Calculating FFT for all_samples: {:?}", all_samples.len());
                 if samples_offset + window_size <= all_samples.len() {
                     let mut buffer: Vec<Complex<f32>> = all_samples
                         [samples_offset..samples_offset + window_size]
@@ -268,10 +263,12 @@ fn audio_control_thread(
                         .collect();
 
                     fft.process(&mut buffer); // Perform FFT in-place
-
-                    // Display the frequency and magnitude information
+                    println!("FFT calculated for start_pos: {:?}", start_pos);
                     display_frequencies(&buffer, sample_rate, window_size, fft_output.clone());
+                    println!("FFT output updated for{:?}",start_pos);
                 } else {
+                    println!("Reached end of audio samples.");
+                    sink.stop();
                     println!(
                         "Not enough data available for FFT calculation at the current position."
                     );
@@ -280,12 +277,11 @@ fn audio_control_thread(
             Command::Play => {
                 println!("Playing audio");
                 sink.play();
-                // last_play_time = Instant::now();
             }
             Command::Pause => {
                 println!("Pausing audio");
-                let elapsed = last_play_time.elapsed();
-                *playback_position.lock().unwrap() += elapsed;
+                // let elapsed = last_play_time.elapsed();
+                // *playback_position.lock().unwrap() += elapsed;
                 sink.pause();
             }
             Command::Seek(position) => {
@@ -302,6 +298,7 @@ fn audio_control_thread(
 }
 
 fn update(app: &App, model: &mut Model, event: Update) {
+    
     model.temp += event.since_last.as_millis();
     if model.temp > 100 {
         model.temp = 0;
@@ -342,10 +339,16 @@ fn view(app: &App, model: &Model, frame: Frame) {
         let octaves: Vec<Vec<f32>> = octaves_flat.chunks(12).map(|x| x.to_vec()).collect();
         // println!("--octaves: {:?}", octaves);
         assert!(octaves.len() == 4, "Expected 4 octaves");
-
+        
         let data = render_drawing::Data::new(octaves);
 
         // println!("--fft_output: {:?}", octaves_flat);
-        render_drawing::draw_on_window(app, frame, &data, &model.buttons);
+        if frame.nth()%100 == 0{
+            render_drawing::draw_on_window(app, frame, &data, &model.buttons);
+        }
+
+           
+        
+
     }
 }

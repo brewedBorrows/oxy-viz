@@ -1,53 +1,38 @@
+import subprocess
+import numpy as np
+from scipy.io.wavfile import write
 import numpy as np
 from scipy.io import wavfile
 from scipy.signal import chirp
-from scipy.io.wavfile import write
-from pydub import AudioSegment
+import shutil
+import subprocess
+import os
 
-def generate_sine_wave(duration, frequency, sample_rate=44100):
-    """
-    Generate a sine wave.
 
-    Args:
-        duration (float): Duration of the sine wave in seconds.
-        frequency (float): Frequency of the sine wave in Hz.
-        sample_rate (int): Sampling rate (samples per second).
+# Constants
+sample_rate = 44100  # Sampling rate in Hz
+duration = 5  # Duration of each sine wave in seconds
 
-    Returns:
-        numpy.array: Array containing the generated sine wave.
-    """
+def generate_sine_wave(frequency, sample_rate, duration):
     t = np.linspace(0, duration, int(sample_rate * duration), endpoint=False)
-    sine_wave = np.sin(2 * np.pi * frequency * t)
-    return sine_wave
+    return 0.5 * np.sin(2 * np.pi * frequency * t)  # Sine wave formula
 
-def export_as_mp3(signal, filename, sample_rate=44100):
-    """
-    Export a signal as an mp3 file.
+def concatenate_waves(frequencies, sample_rate, duration):
+    # Generate sine waves and concatenate them
+    wave = np.concatenate([generate_sine_wave(freq, sample_rate, duration) for freq in frequencies])
+    return wave
 
-    Args:
-        signal (numpy.array): Signal to be exported.
-        filename (str): Name of the mp3 file to be saved.
-        sample_rate (int): Sampling rate (samples per second).
+def create_wave_file(filename, frequencies):
+    wave = concatenate_waves(frequencies, sample_rate, duration)
+    # Scale to 16-bit integers
+    wave_integers = np.int16(wave * 32767)
+    # Write to a .wav file
+    write(filename, sample_rate, wave_integers)
 
-    Returns:
-        None
-    """
-    # Convert the signal to the correct format for pydub
-    signal = (signal * 32767).astype(np.int16)
+# Example usage:
+frequencies = [261.63, 277.18, 293.66, 311.13, 329.63, 349.23, 369.99, 392.00, 415.30, 440.00, 466.16,
+        493.88]  # List of frequencies in Hz
+create_wave_file('./src/test.wav', frequencies)
 
-    # Write the signal to a wav file
-    write(filename + '.wav', sample_rate, signal)
-
-    # Load the wav file using pydub
-    sound = AudioSegment.from_wav(filename + '.wav')
-
-    # Export the sound as an mp3 file
-    sound.export(filename + '.mp3', format="mp3")
-
-if __name__ == "__main__":
-    duration = 5  # Duration of the sine wave in seconds
-    frequency = 261.63  # Frequency of the sine wave in Hz
-    sample_rate = 44100  # Sampling rate (samples per second)
-
-    sine_wave = generate_sine_wave(duration, frequency, sample_rate)
-    export_as_mp3(sine_wave, "sine_wave")
+# Run cargo run command
+subprocess.run(["cargo", "run"])
