@@ -293,7 +293,7 @@ impl DrawVisual for CircleWaveMultiple {
     }
 }
 
-pub fn draw_on_window(app: &App, frame: Frame, data: &Data, buttons: &Vec<ui::Button>) {
+pub fn draw_on_window(app: &App, frame: Frame, data: &Data, ui_elements: &Vec<ui::UIElem>) {
     let draw = app.draw();
     draw.background().color(CORNFLOWERBLUE);
     let win = app.window_rect();
@@ -314,7 +314,7 @@ pub fn draw_on_window(app: &App, frame: Frame, data: &Data, buttons: &Vec<ui::Bu
     ui::render_ui(&draw,
         win,
         &draw_config,
-        buttons,
+        ui_elements,
     );
 
     draw.to_frame(app, &frame).unwrap();

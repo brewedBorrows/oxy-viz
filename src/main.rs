@@ -8,12 +8,12 @@ use rustfft::num_complex::Complex;
 use rustfft::FftPlanner;
 use std::fs::File;
 use std::io::BufReader;
+use std::path::Path;
 use std::sync::mpsc::{self, channel, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 use walkdir::WalkDir;
-use std::path::Path;
 
 mod calculation;
 mod render_drawing;
@@ -30,7 +30,7 @@ struct Playback {
     is_playing: bool,
     curr_pos: Arc<Mutex<Duration>>,
     fft_output: Arc<Mutex<Vec<Complex<f32>>>>,
-    fav_part:Duration,
+    fav_part: Duration,
 }
 
 struct Model {
@@ -38,16 +38,15 @@ struct Model {
     playback: Playback,
     data: render_drawing::Data,
     temp: u128,
-    buttons: Vec<ui::Button>,
+    ui_elements: Vec<ui::UIElem>,
     mp3_files: Vec<std::path::PathBuf>,
     current_track_index: u32,
-
 }
 fn main() {
     nannou::app(model).update(update).run();
 }
 
-const SRC: &str = "src/sine_wave.mp3";
+const SRC: &str = "src/test.mp3";
 
 fn find_mp3_files(dir: &str) -> Vec<std::path::PathBuf> {
     WalkDir::new(dir)
@@ -59,7 +58,6 @@ fn find_mp3_files(dir: &str) -> Vec<std::path::PathBuf> {
         .collect()
 }
 
-
 fn model(app: &App) -> Model {
     println!("i am in model");
     app.new_window()
@@ -69,7 +67,7 @@ fn model(app: &App) -> Model {
         .build()
         .unwrap();
     let directory = "src"; // Change this to the directory you want to search
-    let mp3_files =find_mp3_files(directory);
+    let mp3_files = find_mp3_files(directory);
 
     let fft_output: Arc<Mutex<Vec<Complex<f32>>>> = Arc::new(Mutex::new(vec![]));
 
@@ -91,28 +89,36 @@ fn model(app: &App) -> Model {
     // println!("--data: {:?}", random_data);
 
     let play_button = ui::Button::new(
-        ui::ButtonType::Play,
+        ui::ButtonName::Play,
         ui::BBox::new(0.0, 0.0, 50., 50.),
         || {
             println!("Play button clicked");
         },
     );
     let fav_record = ui::Button::new(
-        ui::ButtonType::FavRecord,
-        ui::BBox::new(50.0, 0.0,50., 50.),
+        ui::ButtonName::FavRecord,
+        ui::BBox::new(50.0, 0.0, 50.0, 50.0),
         || {
             println!("Fav Record button clicked");
         },
-
     );
-    let fav_play =ui::Button::new(
-        ui::ButtonType::FavPlay,
+
+    let fav_play = ui::Button::new(
+        ui::ButtonName::FavPlay,
         ui::BBox::new(100.0, 0.0, 50., 50.),
         || {
             println!("Fav Record button clicked");
         },
     );
-    let buttons = vec![play_button,fav_record,fav_play];
+
+    let seekline = ui::SeekLine::new(500.);
+
+    let ui_elements = vec![
+        ui::UIElem::Button(play_button),
+        ui::UIElem::Button(fav_record),
+        ui::UIElem::Button(fav_play),
+        ui::UIElem::SeekLine(seekline),
+    ];
 
     Model {
         sender,
@@ -120,13 +126,13 @@ fn model(app: &App) -> Model {
             is_playing: false,
             curr_pos: playback_position,
             fft_output,
-            fav_part:Duration::from_secs(0),
+            fav_part: Duration::from_secs(0),
         },
         temp,
         data: random_data,
-        buttons,
+        ui_elements,
         mp3_files,
-        current_track_index:0,
+        current_track_index: 0,
     }
 }
 
@@ -134,43 +140,42 @@ fn mouse_event(app: &App, model: &mut Model, event: WindowEvent) {
     // get mousex and mousey
     let pos = app.mouse.position();
     let (x, y) = (pos.x, pos.y);
-    for button in &model.buttons {
-        match button.buttonType {
-            ui::ButtonType::Play => {},
-            ui::ButtonType::FavPlay=>{},
-            ui::ButtonType::FavRecord=>{},
-        }
-    }
     match event {
         MousePressed(_button) => {
-            let (x, y) = (pos.x, pos.y);
-            println!(" -- x: -- y:{:?} {:?}",x,y);
-            let button_clicked_type = ui::check_button_click(x, y, &model.buttons);
-            if let Some(button_type) = button_clicked_type {
-                println!("hi we are before match");
-                match button_type {
-                    ui::ButtonType::Play => {
-                        println!("Play button clicked");
-                        model.playback.is_playing = !model.playback.is_playing;
-                        let cmd = if model.playback.is_playing == false {
-                            Command::Play
-                        } else {
-                            Command::Pause
-                        };
-                        model.sender.send(cmd).unwrap();
-                    },
-                    ui::ButtonType::FavPlay =>{
-                        println!("playing your fav part of the song");
-                        let new_position = model.playback.fav_part;
-                        model.sender.send(Command::Seek(new_position)).unwrap();
-                    },
-                    ui::ButtonType::FavRecord =>{
-                        println!("record the fav part of the song");
-                        let lock = model.playback.curr_pos.lock().unwrap(); 
-                        model.playback.fav_part = *lock;
-                        
-                    },
+            println!(" -- x: -- y:{:?} {:?}", x, y);
 
+            for element in &model.ui_elements {
+                // if element is a button
+                if let ui::UIElem::Button(button) = element {
+                    if button.bbox.contains(x, y) {
+                        println!("button clicked: {:?}", button.button_name);
+                        match button.button_name {
+                            ui::ButtonName::Play => {
+                                println!("Play button clicked");
+                                model.playback.is_playing = !model.playback.is_playing;
+                                let cmd = if model.playback.is_playing == false {
+                                    Command::Play
+                                } else {
+                                    Command::Pause
+                                };
+                                model.sender.send(cmd).unwrap();
+                            }
+                            ui::ButtonName::FavPlay => {
+                                println!("playing your fav part of the song");
+                                let new_position = model.playback.fav_part;
+                                model.sender.send(Command::Seek(new_position)).unwrap();
+                            }
+                            ui::ButtonName::FavRecord => {
+                                println!("record the fav part of the song");
+                                let lock = model.playback.curr_pos.lock().unwrap();
+                                model.playback.fav_part = *lock;
+                            }
+                            ui::ButtonName::Seek => {
+                                println!("seeking the song");
+                            }
+                        }
+                        break; // break since you can't be clickcing multiple elements at once
+                    }
                 }
             }
         }
@@ -192,7 +197,7 @@ fn key_pressed(_app: &App, model: &mut Model, key: Key) {
         Key::Q => {
             model.sender.send(Command::CalculateFFT).unwrap();
         }
-        Key::N=>{
+        Key::N => {
             println!("looking for new N");
         }
         Key::Left => {
@@ -301,7 +306,6 @@ fn audio_control_thread(
     let sink = Sink::try_new(&stream_handle).unwrap();
     sink.append(source);
 
-
     for command in receiver {
         match command {
             Command::CalculateFFT => {
@@ -394,6 +398,6 @@ fn view(app: &App, model: &Model, frame: Frame) {
         let data = render_drawing::Data::new(octaves);
 
         // println!("--fft_output: {:?}", octaves_flat);
-        render_drawing::draw_on_window(app, frame, &data, &model.buttons);
+        render_drawing::draw_on_window(app, frame, &data, &model.ui_elements);
     }
 }
