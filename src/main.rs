@@ -12,6 +12,8 @@ use std::sync::mpsc::{self, channel, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
+use walkdir::WalkDir;
+use std::path::Path;
 
 mod calculation;
 mod render_drawing;
@@ -28,7 +30,7 @@ struct Playback {
     is_playing: bool,
     curr_pos: Arc<Mutex<Duration>>,
     fft_output: Arc<Mutex<Vec<Complex<f32>>>>,
-    fav_part:(f32,f32),
+    fav_part:Duration,
 }
 
 struct Model {
@@ -37,6 +39,8 @@ struct Model {
     data: render_drawing::Data,
     temp: u128,
     buttons: Vec<ui::Button>,
+    mp3_files: Vec<std::path::PathBuf>,
+    current_track_index: u32,
 
 }
 fn main() {
@@ -44,6 +48,17 @@ fn main() {
 }
 
 const SRC: &str = "src/test.mp3";
+
+fn find_mp3_files(dir: &str) -> Vec<std::path::PathBuf> {
+    WalkDir::new(dir)
+        .follow_links(true)
+        .into_iter()
+        .filter_map(Result::ok)
+        .filter(|e| e.file_type().is_file() && e.path().extension() == Some("mp3".as_ref()))
+        .map(|e| e.path().to_path_buf())
+        .collect()
+}
+
 
 fn model(app: &App) -> Model {
     println!("i am in model");
@@ -53,6 +68,8 @@ fn model(app: &App) -> Model {
         .view(view)
         .build()
         .unwrap();
+    let directory = "src"; // Change this to the directory you want to search
+    let mp3_files =find_mp3_files(directory);
 
     let fft_output: Arc<Mutex<Vec<Complex<f32>>>> = Arc::new(Mutex::new(vec![]));
 
@@ -75,13 +92,27 @@ fn model(app: &App) -> Model {
 
     let play_button = ui::Button::new(
         ui::ButtonType::Play,
-        ui::BBox::new(0.0, 0.0, 500., 500.),
+        ui::BBox::new(0.0, 0.0, 50., 50.),
         || {
             println!("Play button clicked");
         },
     );
+    let fav_record = ui::Button::new(
+        ui::ButtonType::FavRecord,
+        ui::BBox::new(50.0, 0.0,50., 50.),
+        || {
+            println!("Fav Record button clicked");
+        },
 
-    let buttons = vec![play_button];
+    );
+    let fav_play =ui::Button::new(
+        ui::ButtonType::FavPlay,
+        ui::BBox::new(100.0, 0.0, 50., 50.),
+        || {
+            println!("Fav Record button clicked");
+        },
+    );
+    let buttons = vec![play_button,fav_record,fav_play];
 
     Model {
         sender,
@@ -89,11 +120,13 @@ fn model(app: &App) -> Model {
             is_playing: false,
             curr_pos: playback_position,
             fft_output,
-            fav_part:(0.0,0.0),
+            fav_part:Duration::from_secs(0),
         },
         temp,
         data: random_data,
         buttons,
+        mp3_files,
+        current_track_index:0,
     }
 }
 
@@ -103,14 +136,18 @@ fn mouse_event(app: &App, model: &mut Model, event: WindowEvent) {
     let (x, y) = (pos.x, pos.y);
     for button in &model.buttons {
         match button.buttonType {
-            ui::ButtonType::Play => {}
+            ui::ButtonType::Play => {},
+            ui::ButtonType::FavPlay=>{},
+            ui::ButtonType::FavRecord=>{},
         }
     }
     match event {
         MousePressed(_button) => {
-            // println!("Mouse pressed at x: {}, y: {}", x, y);
+            let (x, y) = (pos.x, pos.y);
+            println!(" -- x: -- y:{:?} {:?}",x,y);
             let button_clicked_type = ui::check_button_click(x, y, &model.buttons);
             if let Some(button_type) = button_clicked_type {
+                println!("hi we are before match");
                 match button_type {
                     ui::ButtonType::Play => {
                         println!("Play button clicked");
@@ -121,7 +158,19 @@ fn mouse_event(app: &App, model: &mut Model, event: WindowEvent) {
                             Command::Pause
                         };
                         model.sender.send(cmd).unwrap();
-                    }
+                    },
+                    ui::ButtonType::FavPlay =>{
+                        println!("playing your fav part of the song");
+                        let new_position = model.playback.fav_part;
+                        model.sender.send(Command::Seek(new_position)).unwrap();
+                    },
+                    ui::ButtonType::FavRecord =>{
+                        println!("record the fav part of the song");
+                        let lock = model.playback.curr_pos.lock().unwrap(); 
+                        model.playback.fav_part = *lock;
+                        
+                    },
+
                 }
             }
         }
@@ -142,6 +191,9 @@ fn key_pressed(_app: &App, model: &mut Model, key: Key) {
         }
         Key::Q => {
             model.sender.send(Command::CalculateFFT).unwrap();
+        }
+        Key::N=>{
+            println!("looking for new N");
         }
         Key::Left => {
             println!("Left arrow key pressed");
@@ -249,7 +301,6 @@ fn audio_control_thread(
     let sink = Sink::try_new(&stream_handle).unwrap();
     sink.append(source);
 
-    let last_play_time = Instant::now();
 
     for command in receiver {
         match command {
@@ -259,7 +310,7 @@ fn audio_control_thread(
                 let start_pos = *playback_position.lock().unwrap();
                 // println!("will this be {:?}", start_pos);
                 let samples_offset = (start_pos.as_secs_f32() * sample_rate as f32) as usize;
-                // println!("{:?}", start_pos);
+                println!("{:?}", start_pos);
                 if samples_offset + window_size <= all_samples.len() {
                     let mut buffer: Vec<Complex<f32>> = all_samples
                         [samples_offset..samples_offset + window_size]
@@ -280,12 +331,9 @@ fn audio_control_thread(
             Command::Play => {
                 println!("Playing audio");
                 sink.play();
-                // last_play_time = Instant::now();
             }
             Command::Pause => {
                 println!("Pausing audio");
-                let elapsed = last_play_time.elapsed();
-                *playback_position.lock().unwrap() += elapsed;
                 sink.pause();
             }
             Command::Seek(position) => {
