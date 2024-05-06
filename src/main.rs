@@ -43,7 +43,7 @@ fn main() {
     nannou::app(model).update(update).run();
 }
 
-const SRC: &str = "src/test.mp3";
+const SRC: &str = "src/sine_wave.mp3";
 
 fn model(app: &App) -> Model {
     println!("i am in model");

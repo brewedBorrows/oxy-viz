@@ -19,7 +19,6 @@ impl Button {
 
 pub enum ButtonType {
     Play,
-    
 }
 
 pub struct BBox(f32, f32, f32, f32);

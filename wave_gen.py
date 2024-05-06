@@ -3,6 +3,8 @@ from scipy.io import wavfile
 from scipy.signal import chirp
 from scipy.io.wavfile import write
 from pydub import AudioSegment
+import os
+import shutil
 
 def generate_sine_wave(duration, frequency, sample_rate=44100):
     """
@@ -48,6 +50,11 @@ if __name__ == "__main__":
     duration = 5  # Duration of the sine wave in seconds
     frequency = 261.63  # Frequency of the sine wave in Hz
     sample_rate = 44100  # Sampling rate (samples per second)
-
+    
     sine_wave = generate_sine_wave(duration, frequency, sample_rate)
-    export_as_mp3(sine_wave, "sine_wave")
+
+    export_as_mp3(sine_wave, "./src/sine_wave")
+
+    # send "cargo run" to the terminal to run the code
+    command = "cargo run"
+    os.system(command)
