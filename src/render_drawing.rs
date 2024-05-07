@@ -229,6 +229,25 @@ impl DrawVisual for CircleWave {
         // self.scale_visual(win);
         let points = self.points.iter().map(|p| p.to_cartesian()).collect();
 
+        let notes = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
+        
+        // draw text for each note on the circle, 
+        // theta for C is same as theta for points[0]
+        // r is 50. for all notes
+        let points_for_text: Vec<Vec2> = self.points.iter().map(|p| {
+            let r = 200.;
+            let theta = p.theta;
+            let p_text = PointPolar { r, theta };
+            p_text.to_cartesian()
+        }).collect();
+
+        for (i, note) in notes.iter().enumerate() {
+            draw.text(note)
+                .font_size(20)
+                .x_y(points_for_text[i].x, points_for_text[i].y)
+                .color(BLACK);
+        }
+
         // feed points to spline_generator
         let spline = Spline2D::new(points);
 

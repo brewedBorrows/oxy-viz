@@ -43,10 +43,12 @@ struct Model {
     current_track_index: u32,
 }
 fn main() {
+    let x = 5;
+    println!("HIII");
     nannou::app(model).update(update).run();
 }
 
-const SRC: &str = "src/test.mp3";
+const SRC: &str = "src/dodie.mp3";
 
 fn find_mp3_files(dir: &str) -> Vec<std::path::PathBuf> {
     WalkDir::new(dir)
@@ -88,30 +90,41 @@ fn model(app: &App) -> Model {
     let temp = 0;
     // println!("--data: {:?}", random_data);
 
+    let win = app.window_rect();
+    let BUTTON_W = ui::BUTTON_W as f32;
+    let PADDING = ui::PADDING as f32;
+
     let play_button = ui::Button::new(
         ui::ButtonName::Play,
-        ui::BBox::new(0.0, 0.0, 50., 50.),
+        ui::BBox::new(0.0, 0.0, BUTTON_W, BUTTON_W)
+            .to_bottom_center(win)
+            .translate(-BUTTON_W / 2., 0.),
         || {
             println!("Play button clicked");
-        },
-    );
-    let fav_record = ui::Button::new(
-        ui::ButtonName::FavRecord,
-        ui::BBox::new(50.0, 0.0, 50.0, 50.0),
-        || {
-            println!("Fav Record button clicked");
         },
     );
 
     let fav_play = ui::Button::new(
         ui::ButtonName::FavPlay,
-        ui::BBox::new(100.0, 0.0, 50., 50.),
+        ui::BBox::new(100.0, 0.0, BUTTON_W, BUTTON_W)
+            .to_bottom_right(win)
+            .translate(-PADDING, 0.),
         || {
             println!("Fav Record button clicked");
         },
     );
 
-    let seekline = ui::SeekLine::new(500.);
+    let fav_record = ui::Button::new(
+        ui::ButtonName::FavRecord,
+        ui::BBox::new(50.0, 0.0, BUTTON_W, BUTTON_W)
+            .to_bottom_right(win)
+            .translate(-PADDING - BUTTON_W, 0.),
+        || {
+            println!("Fav Record button clicked");
+        },
+    );
+
+    let seekline = ui::SeekLine::new(win);
 
     let ui_elements = vec![
         ui::UIElem::Button(play_button),
@@ -146,36 +159,51 @@ fn mouse_event(app: &App, model: &mut Model, event: WindowEvent) {
 
             for element in &model.ui_elements {
                 // if element is a button
-                if let ui::UIElem::Button(button) = element {
-                    if button.bbox.contains(x, y) {
-                        println!("button clicked: {:?}", button.button_name);
-                        match button.button_name {
-                            ui::ButtonName::Play => {
-                                println!("Play button clicked");
-                                model.playback.is_playing = !model.playback.is_playing;
-                                let cmd = if model.playback.is_playing == false {
-                                    Command::Play
-                                } else {
-                                    Command::Pause
-                                };
-                                model.sender.send(cmd).unwrap();
-                            }
-                            ui::ButtonName::FavPlay => {
-                                println!("playing your fav part of the song");
-                                let new_position = model.playback.fav_part;
-                                model.sender.send(Command::Seek(new_position)).unwrap();
-                            }
-                            ui::ButtonName::FavRecord => {
-                                println!("record the fav part of the song");
-                                let lock = model.playback.curr_pos.lock().unwrap();
-                                model.playback.fav_part = *lock;
-                            }
-                            ui::ButtonName::Seek => {
-                                println!("seeking the song");
+                match element {
+                    ui::UIElem::Button(button) => {
+                        if button.bbox.contains(x, y) {
+                            println!("button clicked: {:?}", button.button_name);
+                            match button.button_name {
+                                ui::ButtonName::Play => {
+                                    println!("Play button clicked");
+                                    model.playback.is_playing = !model.playback.is_playing;
+                                    let cmd = if model.playback.is_playing == false {
+                                        Command::Play
+                                    } else {
+                                        Command::Pause
+                                    };
+                                    model.sender.send(cmd).unwrap();
+                                }
+                                ui::ButtonName::FavPlay => {
+                                    println!("playing your fav part of the song");
+                                    let new_position = model.playback.fav_part;
+                                    model.sender.send(Command::Seek(new_position)).unwrap();
+                                }
+                                ui::ButtonName::FavRecord => {
+                                    println!("record the fav part of the song");
+                                    let lock = model.playback.curr_pos.lock().unwrap();
+                                    model.playback.fav_part = *lock;
+                                }
+                                ui::ButtonName::Seek => {
+                                    // println!("seeking the song");
+                                    // Coudln't put seekbutton in the vector because it would have created a copy, or multiple ownerships
+                                    // so we'll match seekbutton in ui::UIElem::SeekLine
+                                }
                             }
                         }
-                        break; // break since you can't be clickcing multiple elements at once
                     }
+                    ui::UIElem::SeekLine(seekline) => {
+                        if seekline.bbox.contains(x, y) {
+                            println!("seekline clicked");
+                            let new_position = seekline.get_playback_pos(x);
+                            println!("new position in percent: {:?}%", new_position*100.);
+                            
+                        }
+                        if seekline.button.bbox.contains(x, y) {
+                            println!("seekline button clicked");
+                        }
+                    }
+                    _ => {}
                 }
             }
         }
