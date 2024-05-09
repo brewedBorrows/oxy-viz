@@ -1,431 +1,524 @@
-use crate::ui::Button;
-use minimp3::{Decoder as MiniDecoder, Frame as miniFrame};
-use nannou::prelude::*;
-use nannou::state::mouse;
-use nannou::text::pt_to_scale;
-use rodio::{Decoder, OutputStream, Sink, Source};
-use rustfft::num_complex::Complex;
-use rustfft::FftPlanner;
+use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+use cpal::{ChannelCount, SampleFormat, SampleRate, SizedSample, Stream, StreamConfig};
+use itertools::Itertools;
+use rodio::source::UniformSourceIterator;
+use rodio::{Decoder, Source};
+use std::collections::VecDeque;
 use std::fs::File;
 use std::io::BufReader;
-use std::path::Path;
-use std::sync::mpsc::{self, channel, Receiver, Sender};
-use std::sync::{Arc, Mutex};
+use std::path::{Path, PathBuf};
+use std::sync::mpsc::{Receiver, Sender};
+use std::sync::{mpsc, Arc, Mutex, Weak};
 use std::thread;
 use std::time::{Duration, Instant};
-use walkdir::WalkDir;
+use universal_audio_decoder::{new_uniform_source_iterator, TrueUniformSourceIterator};
+use std::f32::consts;
+use hound::{WavWriter, WavSpec};
+use std::io::{Read, Write};
 
-mod calculation;
-mod render_drawing;
-mod ui;
 
-enum Command {
+pub struct AudioManager {
+    pub stream_config: StreamConfig,
+    sender_to_audio: Sender<MessageToAudio>,
+    drop_sender: Sender<()>,
+    playback_position: Arc<Mutex<PlaybackPosition>>,
+}
+
+enum PlaybackPosition {
+    NotStarted,
+    Seeking {
+        music_position: f64,
+    },
+    Paused {
+        music_position: f64,
+    },
+    Playing {
+        music_position: f64,
+        instant: Instant,
+        play_speed: f64,
+    },
+}
+
+enum MessageToAudio {
     Play,
     Pause,
-    Seek(Duration),
-    CalculateFFT,
+    Seek(f64),
+    LoadMusic(PathBuf),
+    SetMusicVolume(f64),
+    SetPlaySpeed(f64),
 }
 
-struct Playback {
-    is_playing: bool,
-    curr_pos: Arc<Mutex<Duration>>,
-    fft_output: Arc<Mutex<Vec<Complex<f32>>>>,
-    fav_part: Duration,
+type MusicSource = TrueUniformSourceIterator<Decoder<BufReader<File>>>;
+
+struct AudioThreadState {
+    stream_config: StreamConfig,
+
+    music: Option<MusicSource>,
+
+    receiver_to_audio: mpsc::Receiver<MessageToAudio>,
+    playing: bool,
+    played_sample_count: usize,
+    skip_sample_count: usize,
+    playback_position_ptr: Weak<Mutex<PlaybackPosition>>,
+    music_volume: f32,
+    play_speed: f64,
 }
 
-struct Model {
-    sender: Sender<Command>,
-    playback: Playback,
-    data: render_drawing::Data,
-    temp: u128,
-    ui_elements: Vec<ui::UIElem>,
-    mp3_files: Vec<std::path::PathBuf>,
-    current_track_index: u32,
-}
-fn main() {
-    let x = 5;
-    println!("HIII");
-    nannou::app(model).update(update).run();
+#[derive(Debug)]
+enum Error {
+    AudioError(String),
 }
 
-const SRC: &str = "src/dodie.mp3";
-
-fn find_mp3_files(dir: &str) -> Vec<std::path::PathBuf> {
-    WalkDir::new(dir)
-        .follow_links(true)
-        .into_iter()
-        .filter_map(Result::ok)
-        .filter(|e| e.file_type().is_file() && e.path().extension() == Some("mp3".as_ref()))
-        .map(|e| e.path().to_path_buf())
-        .collect()
-}
-
-fn model(app: &App) -> Model {
-    println!("i am in model");
-    app.new_window()
-        .key_pressed(key_pressed)
-        .event(mouse_event)
-        .view(view)
-        .build()
-        .unwrap();
-    let directory = "src"; // Change this to the directory you want to search
-    let mp3_files = find_mp3_files(directory);
-
-    let fft_output: Arc<Mutex<Vec<Complex<f32>>>> = Arc::new(Mutex::new(vec![]));
-
-    let (sender, receiver) = mpsc::channel::<Command>();
-    let playback_position = Arc::new(Mutex::new(Duration::from_secs(0)));
-
-    let playback_position_clone = Arc::clone(&playback_position);
-    let fft_output_clone = Arc::clone(&fft_output);
-
-    println!("this is just before stream play");
-    thread::spawn(move || {
-        audio_control_thread(receiver, playback_position_clone, fft_output_clone)
-    });
-    println!("Audio thread spawned");
-
-    // gen random data for testing
-    let random_data = render_drawing::Data::create_random_data();
-    let temp = 0;
-    // println!("--data: {:?}", random_data);
-
-    let win = app.window_rect();
-    let BUTTON_W = ui::BUTTON_W as f32;
-    let PADDING = ui::PADDING as f32;
-
-    let play_button = ui::Button::new(
-        ui::ButtonName::Play,
-        ui::BBox::new(0.0, 0.0, BUTTON_W, BUTTON_W)
-            .to_bottom_center(win)
-            .translate(-BUTTON_W / 2., 0.),
-        || {
-            println!("Play button clicked");
-        },
-    );
-
-    let fav_play = ui::Button::new(
-        ui::ButtonName::FavPlay,
-        ui::BBox::new(100.0, 0.0, BUTTON_W, BUTTON_W)
-            .to_bottom_right(win)
-            .translate(-PADDING, 0.),
-        || {
-            println!("Fav Record button clicked");
-        },
-    );
-
-    let fav_record = ui::Button::new(
-        ui::ButtonName::FavRecord,
-        ui::BBox::new(50.0, 0.0, BUTTON_W, BUTTON_W)
-            .to_bottom_right(win)
-            .translate(-PADDING - BUTTON_W, 0.),
-        || {
-            println!("Fav Record button clicked");
-        },
-    );
-
-    let seekline = ui::SeekLine::new(win);
-
-    let ui_elements = vec![
-        ui::UIElem::Button(play_button),
-        ui::UIElem::Button(fav_record),
-        ui::UIElem::Button(fav_play),
-        ui::UIElem::SeekLine(seekline),
-    ];
-
-    Model {
-        sender,
-        playback: Playback {
-            is_playing: false,
-            curr_pos: playback_position,
-            fft_output,
-            fav_part: Duration::from_secs(0),
-        },
-        temp,
-        data: random_data,
-        ui_elements,
-        mp3_files,
-        current_track_index: 0,
+impl AudioThreadState {
+    pub fn new(
+        stream_config: StreamConfig,
+        receiver_to_audio: mpsc::Receiver<MessageToAudio>,
+        playback_position_ptr: Weak<Mutex<PlaybackPosition>>,
+    ) -> Self {
+        AudioThreadState {
+            stream_config,
+            music: None,
+            receiver_to_audio,
+            playing: false,
+            played_sample_count: 0,
+            skip_sample_count: 0,
+            playback_position_ptr,
+            music_volume: 1.0,
+            play_speed: 1.0,
+        }
     }
-}
 
-fn mouse_event(app: &App, model: &mut Model, event: WindowEvent) {
-    // get mousex and mousey
-    let pos = app.mouse.position();
-    let (x, y) = (pos.x, pos.y);
-    match event {
-        MousePressed(_button) => {
-            println!(" -- x: -- y:{:?} {:?}", x, y);
-
-            for element in &model.ui_elements {
-                // if element is a button
-                match element {
-                    ui::UIElem::Button(button) => {
-                        if button.bbox.contains(x, y) {
-                            println!("button clicked: {:?}", button.button_name);
-                            match button.button_name {
-                                ui::ButtonName::Play => {
-                                    println!("Play button clicked");
-                                    model.playback.is_playing = !model.playback.is_playing;
-                                    let cmd = if model.playback.is_playing == false {
-                                        Command::Play
-                                    } else {
-                                        Command::Pause
-                                    };
-                                    model.sender.send(cmd).unwrap();
+    fn data_callback<S>(mut self) -> impl FnMut(&mut [S], &cpal::OutputCallbackInfo)
+    where
+        S: SizedSample + cpal::FromSample<f32>,
+    {
+        move |output, callback_info| {
+            for message in self.receiver_to_audio.try_iter() {
+                match message {
+                    MessageToAudio::Play => {
+                        self.playing = true;
+                    }
+                    MessageToAudio::Pause => {
+                        self.playing = false;
+                        self.update_pause_state();
+                    }
+                    MessageToAudio::Seek(time) => {
+                        if let Err(e) = if let (Some(music), false) = (&mut self.music, false) {
+                            match music
+                                .seek(time.max(0.0))
+                                .map_err(|e| Error::AudioError("couldn't seek".to_string()))
+                            {
+                                Ok(sample_count) => {
+                                    self.skip_sample_count = (-time.min(0.0)
+                                        * self.stream_config.sample_rate.0 as f64
+                                        / self.play_speed)
+                                        as usize
+                                        * (self.stream_config.channels as usize);
+                                    self.played_sample_count = sample_count as usize;
+                                    self.update_pause_state();
+                                    Ok(())
                                 }
-                                ui::ButtonName::FavPlay => {
-                                    println!("playing your fav part of the song");
-                                    let new_position = model.playback.fav_part;
-                                    model.sender.send(Command::Seek(new_position)).unwrap();
-                                }
-                                ui::ButtonName::FavRecord => {
-                                    println!("record the fav part of the song");
-                                    let lock = model.playback.curr_pos.lock().unwrap();
-                                    model.playback.fav_part = *lock;
-                                }
-                                ui::ButtonName::Seek => {
-                                    // println!("seeking the song");
-                                    // Coudln't put seekbutton in the vector because it would have created a copy, or multiple ownerships
-                                    // so we'll match seekbutton in ui::UIElem::SeekLine
-                                }
+                                Err(e) => Err(e),
                             }
+                        } else {
+                            Err(Error::AudioError("No music loaded".to_string()))
+                        } {
+                            println!("Failed to seek: {:?}", e);
                         }
                     }
-                    ui::UIElem::SeekLine(seekline) => {
-                        if seekline.bbox.contains(x, y) {
-                            println!("seekline clicked");
-                            let new_position = seekline.get_playback_pos(x);
-                            println!("new position in percent: {:?}%", new_position*100.);
-                            
-                        }
-                        if seekline.button.bbox.contains(x, y) {
-                            println!("seekline button clicked");
-                        }
+                    MessageToAudio::LoadMusic(path) => {
+                        self.music = Some(self.load_music(path).unwrap())
                     }
-                    _ => {}
+                    MessageToAudio::SetMusicVolume(volume) => self.music_volume = volume as f32,
+                    MessageToAudio::SetPlaySpeed(speed) => {
+                        self.play_speed = speed;
+                        if let Some(music) = &mut self.music {
+                            music.set_output_sample_rate(
+                                self.stream_config.sample_rate.0 as f64 / speed,
+                            );
+                        };
+                    }
                 }
             }
-        }
-        _ => {}
-    }
-}
 
-fn key_pressed(_app: &App, model: &mut Model, key: Key) {
-    match key {
-        Key::Space => {
-            model.playback.is_playing = !model.playback.is_playing;
-            let cmd = if model.playback.is_playing == false {
-                Command::Play
-            } else {
-                Command::Pause
-            };
-            model.sender.send(cmd).unwrap();
-        }
-        Key::Q => {
-            model.sender.send(Command::CalculateFFT).unwrap();
-        }
-        Key::N => {
-            println!("looking for new N");
-        }
-        Key::Left => {
-            println!("Left arrow key pressed");
-            let lock = model.playback.curr_pos.lock().unwrap(); //locked the variable here for mutex,
-            let new_position = if *lock > Duration::from_secs(5) {
-                *lock - Duration::from_secs(5)
-            } else {
-                Duration::from_secs(0)
-            };
-            model.sender.send(Command::Seek(new_position)).unwrap(); // passing the timestamp to audio thread
-        }
-        Key::Right => {
-            println!("Right arrow key pressed");
-            let lock = model.playback.curr_pos.lock().unwrap(); //locked the variable here for mutex,  and blah blah blah
-            let new_position = *lock + Duration::from_secs(5);
-            model.sender.send(Command::Seek(new_position)).unwrap(); // passing the timestamp to audio thread
-        }
-        _ => {}
-    }
-}
+            if self.playing {
+                let timestamp = callback_info.timestamp();
+                let instant = Instant::now()
+                    + timestamp
+                        .playback
+                        .duration_since(&timestamp.callback)
+                        .unwrap_or_else(|| Duration::from_nanos(0));
 
-fn display_frequencies(
-    buffer: &[Complex<f32>],
-    sample_rate: usize,
-    fft_size: usize,
-    fft_output: Arc<Mutex<Vec<Complex<f32>>>>,
-) {
-    let target_notes = generate_note_frequencies(4); // Generate frequencies for 4 octaves
-    assert!(target_notes.len() == 48, "Expected 48 target notes");
+                let playing_sample_count = output.len() / (self.stream_config.channels as usize);
 
-    let mut output = fft_output.lock().expect("Mutex was poisoned").to_vec();
+                let music_position_start = self.music_position_start() * self.play_speed;
+                let music_position_end = (self.played_sample_count + playing_sample_count) as f64
+                    / self.stream_config.sample_rate.0 as f64
+                    * self.play_speed;
 
-    // Clear previous results
-    output.clear();
+                if let Some(playback_position) = self.playback_position_ptr.upgrade() {
+                    let mut playback_position = playback_position
+                        .lock()
+                        .map_err(|e| format!("The main thread has been panicked: {}", e))
+                        .unwrap(); // Intentionally panic when error
+                    *playback_position = PlaybackPosition::Playing {
+                        instant,
+                        music_position: music_position_start,
+                        play_speed: self.play_speed,
+                    };
+                }
 
-    for freq in &target_notes {
-        let freq_magnitude_complex = Complex::new(*freq, 0.0);
-        output.push(freq_magnitude_complex);
-    }
+                // TODO: SPAGHETTI CODE!
+                self.played_sample_count += output.len().saturating_sub(self.skip_sample_count)
+                    / (self.stream_config.channels as usize)
+            }
 
-    for (i, complex) in buffer.iter().enumerate() {
-        let frequency = (i as f32 * sample_rate as f32) / fft_size as f32;
-        let magnitude = complex.norm();
-        for freq_magnitude in output.iter_mut() {
-            if (frequency - freq_magnitude.re).abs() < 1.0 && magnitude > 1.0 {
-                // Update the magnitude if the condition is met
-                freq_magnitude.im = magnitude;
-                break; // Stop checking once the first match is found and updated
+            for out in output.iter_mut() {
+                let mut next = match &mut self.music {
+                    Some(music) if self.playing => {
+                        if self.skip_sample_count > 0 {
+                            self.skip_sample_count -= 1;
+                            None
+                        } else {
+                            music.next().map(|a| a * self.music_volume)
+                        }
+                    }
+                    _ => None,
+                }
+                .unwrap_or(0.0)
+                .clamp(-4.0, 4.0); // Prevent too large sound
+
+                *out = S::from_sample(next);
             }
         }
     }
 
-    // println!("--output: {:?}", output);
+    fn update_pause_state(&self) {
+        if let Some(playback_position) = self.playback_position_ptr.upgrade() {
+            let mut playback_position = playback_position
+                .lock()
+                .map_err(|e| Error::AudioError(format!("Error locking playback position: {}", e)))
+                .unwrap();
+            *playback_position = PlaybackPosition::Paused {
+                music_position: self.music_position_start(),
+            };
+        }
+    }
 
-    assert!(
-        output.len() == 48,
-        "Expected 48 output values after processing"
+    fn music_position_start(&self) -> f64 {
+        let sample_index = self.played_sample_count as isize
+            - self.skip_sample_count as isize / self.stream_config.channels as isize;
+        sample_index as f64 / self.stream_config.sample_rate.0 as f64
+    }
+
+    pub fn load_music(&self, wave: PathBuf) -> Result<MusicSource, Error> {
+        let file = std::fs::File::open(wave)
+            .map_err(|e| Error::AudioError(format!("Error opening file: {}", e)))?;
+        let decoder = rodio::Decoder::new(BufReader::new(file))
+            .map_err(|e| Error::AudioError(format!("Error creating decoder: {}", e)))?;
+        let ret = new_uniform_source_iterator(decoder, &self.stream_config);
+        Ok(ret)
+    }
+}
+
+impl AudioManager {
+    pub fn new() -> Result<Self, Error> {
+        let (sender_to_audio, receiver_to_audio) = mpsc::channel();
+        let (stream_config_sender, stream_config_receiver) = mpsc::channel();
+        let (drop_sender, drop_receiver) = mpsc::channel();
+        let playback_position = Arc::new(Mutex::new(PlaybackPosition::NotStarted));
+
+        let playback_position_ptr = Arc::downgrade(&playback_position);
+
+        thread::spawn(move || {
+            match stream_thread(receiver_to_audio, playback_position_ptr) {
+                Ok((stream_config, _stream)) => {
+                    if stream_config_sender.send(Ok(stream_config)).is_err() {
+                        eprintln!("Failed to send stream config to main thread");
+                    }
+                    // Wait for the main thread to drop the AudioManager
+                    drop_receiver.recv().ok();
+                }
+                Err(err) => {
+                    if stream_config_sender.send(Err(err)).is_err() {
+                        eprintln!("Failed to send error to main thread");
+                    }
+                }
+            }
+        });
+        let stream_config = stream_config_receiver.recv().map_err(|e| {
+            Error::AudioError(format!(
+                "audio device initialization thread: Error receiving stream config: {}",
+                e
+            ))
+        })??;
+
+        Ok(AudioManager {
+            stream_config,
+            sender_to_audio,
+            drop_sender,
+            playback_position,
+        })
+    }
+
+    pub fn load_music<P>(&self, path: P) -> Result<(), Error>
+    where
+        P: Into<PathBuf>,
+    {
+        self.sender_to_audio
+            .send(MessageToAudio::LoadMusic(path.into()))
+            .map_err(|_| Error::AudioError("Failed to send load music message".to_string()))
+    }
+
+    pub fn play(&self) -> Result<(), Error> {
+        self.sender_to_audio
+            .send(MessageToAudio::Play)
+            .map_err(|e| Error::AudioError("Failed to play music".to_string()))
+    }
+
+    pub fn pause(&self) -> Result<(), Error> {
+        self.sender_to_audio
+            .send(MessageToAudio::Pause)
+            .map_err(|e| Error::AudioError("Failed to pause music".to_string()))
+    }
+
+    pub fn seek(&self, time: f64) -> Result<(), Error> {
+        {
+            // TODO there should be a better way
+            let mut playback_position = self.playback_position.lock().map_err(|_| {
+                Error::AudioError(
+                    "Failed to obtain music position; the audio stream has been panicked"
+                        .to_string(),
+                )
+            })?;
+            *playback_position = PlaybackPosition::Seeking {
+                music_position: time,
+            };
+        }
+        self.sender_to_audio
+            .send(MessageToAudio::Seek(time))
+            .map_err(|_| {
+                Error::AudioError("Failed to seek music, audio stream stopped".to_string())
+            })
+    }
+
+    pub fn playing(&self) -> Result<bool, Error> {
+        let playback_position = self.playback_position.lock().map_err(|_| {
+            Error::AudioError(
+                "Failed to obtain music position; the audio stream has been panicked".to_string(),
+            )
+        })?;
+        Ok(matches!(
+            *playback_position,
+            PlaybackPosition::Playing { .. }
+        ))
+    }
+
+    pub fn set_music_volume(&self, volume: f32) -> Result<(), Error> {
+        self.sender_to_audio
+            .send(MessageToAudio::SetMusicVolume(volume as f64))
+            .map_err(|_| {
+                Error::AudioError("Failed to set music volume; audio stream stopped".to_string())
+            })
+    }
+
+    pub fn set_play_speed(&self, speed: f64) -> Result<(), Error> {
+        self.sender_to_audio
+            .send(MessageToAudio::SetPlaySpeed(speed))
+            .map_err(|_| {
+                Error::AudioError(
+                    "Failed to set play speed; the audio stream has been stopped".to_string(),
+                )
+            })
+    }
+
+    /// Returns error only if the audio stream has been pannicked.
+    pub fn music_position(&self) -> Result<Option<f64>, Error> {
+        let playback_position = self.playback_position.lock().map_err(|_| {
+            Error::AudioError(
+                "Failed to obtain music position; the audio stream has been panicked".to_string(),
+            )
+        })?;
+        use PlaybackPosition::*;
+        let res = match *playback_position {
+            Playing {
+                music_position,
+                instant,
+                play_speed,
+            } => {
+                let now = Instant::now();
+                let diff = if now > instant {
+                    (now - instant).as_secs_f64() * play_speed
+                } else {
+                    -(instant - now).as_secs_f64() * play_speed
+                };
+                Some(music_position + diff)
+            }
+            Paused { music_position } | Seeking { music_position } => Some(music_position),
+            NotStarted => None,
+        };
+        Ok(res)
+    }
+}
+
+impl Drop for AudioManager {
+    fn drop(&mut self) {
+        if self.drop_sender.send(()).is_err() {
+            eprintln!("Failed to send drop signal to audio thread");
+        }
+    }
+}
+
+fn stream_thread(
+    receiver_to_audio: Receiver<MessageToAudio>,
+    playback_position_ptr: Weak<Mutex<PlaybackPosition>>,
+) -> Result<(StreamConfig, Stream), Error> {
+    let host = cpal::default_host();
+    let device = host
+        .default_output_device()
+        .ok_or_else(|| Error::AudioError("No output device found".to_string()))?;
+    let mut supported_configs_range = device
+        .supported_output_configs()
+        .map_err(|e| Error::AudioError(format!("Error getting supported output configs: {}", e)))?;
+    let supported_config = supported_configs_range
+        .next()
+        .ok_or_else(|| Error::AudioError("No supported output config found".to_string()))?
+        .with_max_sample_rate();
+    dbg!("Supported config: {:?}", supported_config.clone());
+    let sample_format = supported_config.sample_format();
+    let stream_config: StreamConfig = supported_config.into();
+    let state = AudioThreadState::new(
+        stream_config.clone(),
+        receiver_to_audio,
+        playback_position_ptr,
     );
-    *fft_output.lock().unwrap() = output;
+    let error_callback = |err| eprintln!("an error occurred on the output audio stream: {}", err);
+    let stream = match sample_format {
+        SampleFormat::F32 => device.build_output_stream(
+            &stream_config,
+            state.data_callback::<f32>(),
+            error_callback,
+            None,
+        ),
+        SampleFormat::F64 => device.build_output_stream(
+            &stream_config,
+            state.data_callback::<f32>(),
+            error_callback,
+            None,
+        ),
+        SampleFormat::I8 => device.build_output_stream(
+            &stream_config,
+            state.data_callback::<i8>(),
+            error_callback,
+            None,
+        ),
+        SampleFormat::I16 => device.build_output_stream(
+            &stream_config,
+            state.data_callback::<i16>(),
+            error_callback,
+            None,
+        ),
+        SampleFormat::I32 => device.build_output_stream(
+            &stream_config,
+            state.data_callback::<i32>(),
+            error_callback,
+            None,
+        ),
+        SampleFormat::I64 => device.build_output_stream(
+            &stream_config,
+            state.data_callback::<i64>(),
+            error_callback,
+            None,
+        ),
+        SampleFormat::U8 => device.build_output_stream(
+            &stream_config,
+            state.data_callback::<u8>(),
+            error_callback,
+            None,
+        ),
+        SampleFormat::U16 => device.build_output_stream(
+            &stream_config,
+            state.data_callback::<u16>(),
+            error_callback,
+            None,
+        ),
+        SampleFormat::U32 => device.build_output_stream(
+            &stream_config,
+            state.data_callback::<u32>(),
+            error_callback,
+            None,
+        ),
+        SampleFormat::U64 => device.build_output_stream(
+            &stream_config,
+            state.data_callback::<u64>(),
+            error_callback,
+            None,
+        ),
+        _ => {
+            // TODO: is this the right way?
+            return Err(Error::AudioError("Unsupported sample format".to_string()));
+        }
+    };
+    let stream =
+        stream.map_err(|e| Error::AudioError(format!("Error building output stream: {}", e)))?;
+    stream
+        .play()
+        .map_err(|e| Error::AudioError(format!("Error playing output stream: {}", e)))?;
+    Ok((stream_config, stream))
 }
 
-fn generate_note_frequencies(octaves: usize) -> Vec<f32> {
-    let base_notes = [
-        261.63, 277.18, 293.66, 311.13, 329.63, 349.23, 369.99, 392.00, 415.30, 440.00, 466.16,
-        493.88,
-    ];
-    let mut frequencies = Vec::new();
-    for octave in 0..octaves {
-        let multiplier = 2.0f32.powi(octave as i32);
-        frequencies.extend(base_notes.iter().map(|&f| f * multiplier));
+
+// Define a function to generate a sine wave for a given frequency and duration
+fn generate_sine_wave(frequency: f32, duration_secs: f32, sample_rate: u32) -> Vec<i16> {
+    let mut samples = Vec::new();
+    for n in 0..(duration_secs * sample_rate as f32) as u32 {
+        let value = (2.0 * consts::PI * frequency * (n as f32) / sample_rate as f32).sin();
+        let amplitude = i16::MAX as f32;
+        samples.push((value * amplitude) as i16);
     }
-    frequencies
+    samples
 }
 
-fn audio_control_thread(
-    receiver: Receiver<Command>,
-    playback_position: Arc<Mutex<Duration>>,
-    fft_output: Arc<Mutex<Vec<Complex<f32>>>>,
-) {
-    println!("i am in audio_control_thread");
+// Function to generate a wav file from a series of frequencies representing musical notes
+pub fn generate_scale(frequencies: Vec<f32>, duration_secs: f32, sample_rate: u32) -> Result<PathBuf, std::io::Error> {
+    let spec = WavSpec {
+        channels: 1,
+        sample_rate,
+        bits_per_sample: 16,
+        sample_format: hound::SampleFormat::Int,
+    };
 
-    let file_path = SRC;
-    let file = File::open(file_path).expect("Failed to open audio file");
-    let mut decoder = MiniDecoder::new(BufReader::new(file));
+    let path = PathBuf::from("scale.wav");
+    let mut writer = WavWriter::create(path.clone(), spec).unwrap();
 
-    // Decode entire file into memory
-    let mut all_samples = Vec::new();
-    while let Ok(miniFrame { data, .. }) = decoder.next_frame() {
-        all_samples.extend(data);
-    }
-    let file = File::open(SRC).expect("Failed to open audio file");
-    let file = BufReader::new(file);
-    let decoder = Decoder::new(file).expect("Failed to decode audio file");
-    let source: rodio::source::Amplify<
-        rodio::source::SamplesConverter<Decoder<BufReader<File>>, i16>,
-    > = decoder.convert_samples::<i16>().amplify(0.25);
-    let sample_rate = 44100;
-    let channels = 2;
-    let window_size = (0.5 * sample_rate as f32) as usize * channels;
-
-    let mut planner = FftPlanner::new();
-    let fft = planner.plan_fft_forward(window_size);
-
-    let (_stream, stream_handle) = OutputStream::try_default().unwrap();
-    let sink = Sink::try_new(&stream_handle).unwrap();
-    sink.append(source);
-
-    for command in receiver {
-        match command {
-            Command::CalculateFFT => {
-                // println!("Calculating FFT");
-                // let elapsed = last_play_time.elapsed();
-                let start_pos = *playback_position.lock().unwrap();
-                // println!("will this be {:?}", start_pos);
-                let samples_offset = (start_pos.as_secs_f32() * sample_rate as f32) as usize;
-                println!("{:?}", start_pos);
-                if samples_offset + window_size <= all_samples.len() {
-                    let mut buffer: Vec<Complex<f32>> = all_samples
-                        [samples_offset..samples_offset + window_size]
-                        .iter()
-                        .map(|&x| Complex::new(x as f32, 0.0))
-                        .collect();
-
-                    fft.process(&mut buffer); // Perform FFT in-place
-
-                    // Display the frequency and magnitude information
-                    display_frequencies(&buffer, sample_rate, window_size, fft_output.clone());
-                } else {
-                    println!(
-                        "Not enough data available for FFT calculation at the current position."
-                    );
-                }
-            }
-            Command::Play => {
-                println!("Playing audio");
-                sink.play();
-            }
-            Command::Pause => {
-                println!("Pausing audio");
-                sink.pause();
-            }
-            Command::Seek(position) => {
-                println!("Seeking audio to {:?}", position);
-                if let Err(e) = sink.try_seek(position) {
-                    eprintln!("Failed to seek: {}", e);
-                } else {
-                    *playback_position.lock().unwrap() = position;
-                    sink.play();
-                }
-            }
+    for &frequency in &frequencies {
+        let samples = generate_sine_wave(frequency, duration_secs, sample_rate);
+        for sample in samples {
+            writer.write_sample(sample).unwrap();
         }
     }
+
+    writer.finalize().unwrap();
+    Ok(path)
 }
 
-fn update(app: &App, model: &mut Model, event: Update) {
-    model.temp += event.since_last.as_millis();
-    if model.temp > 100 {
-        model.temp = 0;
-        // println!("------ event called{:?}", event.since_last.as_secs_f32());
-        model.sender.send(Command::CalculateFFT).unwrap();
-    }
-    // update curr position
-    if !model.playback.is_playing {
-        let elapsed = event.since_last;
-        let mut lock = model.playback.curr_pos.lock().unwrap();
-        *lock += elapsed;
-    }
-}
+fn main() {
 
-fn view(app: &App, model: &Model, frame: Frame) {
-    // calulations for viz
-    // let amp = calculation::calculate(&model.playback.is_playing);
 
-    let x = model
-        .playback
-        .fft_output
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .to_vec();
-    if x.len() < 48 {
-        return;
-    } else {
-        let octaves_flat: Vec<f32> = model
-            .playback
-            .fft_output
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .to_vec()[x.len() - 48..]
-            .iter()
-            .map(|x| x.im)
-            .collect();
+    let sample_rate = 44100;
+    // Frequencies for the C major scale: C, D, E, F, G, A, B, C
+    let frequencies = vec![261.63, 293.66, 329.63, 349.23, 392.00, 440.00, 493.88, 523.25];
+    
+    // Duration of each note in seconds
+    let note_duration = Duration::from_secs_f32(0.5);
 
-        let octaves: Vec<Vec<f32>> = octaves_flat.chunks(12).map(|x| x.to_vec()).collect();
-        // println!("--octaves: {:?}", octaves);
-        assert!(octaves.len() == 4, "Expected 4 octaves");
 
-        let data = render_drawing::Data::new(octaves);
+    // Generate the scale
+    let path = generate_scale(frequencies, note_duration.as_secs_f32(), sample_rate).unwrap();
 
-        // println!("--fft_output: {:?}", octaves_flat);
-        render_drawing::draw_on_window(app, frame, &data, &model.ui_elements);
-    }
+    // run the audio manager
+    let audio_manager = AudioManager::new().unwrap();
+
+    // wait for 5 seconds
+    std::thread::sleep(Duration::from_secs(6));
 }
