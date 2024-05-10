@@ -1,4 +1,5 @@
 use crate::ui::Button;
+use core::time;
 use minimp3::{Decoder as MiniDecoder, Frame as miniFrame};
 use nannou::prelude::*;
 use nannou::state::mouse;
@@ -6,7 +7,6 @@ use nannou::text::pt_to_scale;
 use rodio::{Decoder, OutputStream, Sink, Source};
 use rustfft::num_complex::Complex;
 use rustfft::FftPlanner;
-use core::time;
 use std::fs::File;
 use std::io::{BufReader, Stdout};
 use std::path::Path;
@@ -85,7 +85,7 @@ fn main() {
     nannou::app(model).update(update).run();
 }
 
-const SRC: &str = "src/scale_c_to_c.mp3";
+const SRC: &str = "src/c_major.wav";
 
 fn find_mp3_files(dir: &str) -> Vec<std::path::PathBuf> {
     WalkDir::new(dir)
@@ -101,6 +101,7 @@ struct AudioManager {
     sender_to_audio: Sender<Command>,
     playback_position: Arc<Mutex<Duration>>,
     fft_output: Arc<Mutex<Vec<Complex<f32>>>>,
+    last_fft_generated_at: Arc<Mutex<Option<Instant>>>, // for debugging mostly
     mp3_files: Vec<std::path::PathBuf>,
 }
 
@@ -122,6 +123,7 @@ fn create_audio_thread() -> AudioManager {
             receiver,
             playback_position_clone,
             fft_output_clone,
+            Arc::new(Mutex::new(None)),
         )
     });
     println!("Audio thread spawned");
@@ -130,6 +132,7 @@ fn create_audio_thread() -> AudioManager {
         playback_position,
         fft_output,
         mp3_files,
+        last_fft_generated_at: Arc::new(Mutex::new(None)),
     }
 }
 
@@ -141,8 +144,6 @@ fn model(app: &App) -> Model {
         .view(view)
         .build()
         .unwrap();
-
-
 
     // gen random data for testing
     let random_data = render_drawing::Data::create_random_data();
@@ -329,22 +330,31 @@ fn generate_note_frequencies(octaves: usize) -> Vec<f32> {
 type RodioSource =
     rodio::source::Amplify<rodio::source::SamplesConverter<Decoder<BufReader<File>>, i16>>;
 fn load_audio(file_path: &str) -> Result<RodioSource, &str> {
+    // if mp3:
     info!("Loading audio file");
     let t = Instant::now();
     let file = File::open(file_path).map_err(|_| "Failed to open audio file")?;
     let file = BufReader::new(file);
-    let decoder = Decoder::new(file).map_err(|_| "Failed to decode audio file")?;
+
+    let decoder = match file_path {
+        _ if file_path.ends_with(".mp3") => Decoder::new(file),
+        _ if file_path.ends_with(".wav") => Decoder::new_wav(file),
+        _ => return Err("Unsupported file format"),
+    }
+    .map_err(|_| "Failed to decode audio file")?;
+
     let source: rodio::source::Amplify<
         rodio::source::SamplesConverter<Decoder<BufReader<File>>, i16>,
     > = decoder.convert_samples::<i16>().amplify(0.25);
     info!("Time to load audio: {:?}", t.elapsed());
-    Ok(source)
+    return Ok(source);
 }
 
 fn audio_control_thread(
     receiver: Receiver<Command>,
     playback_position: Arc<Mutex<Duration>>,
     fft_output: Arc<Mutex<Vec<Complex<f32>>>>,
+    last_fft_generated_at: Arc<Mutex<Option<Instant>>>,
 ) {
     println!("i am in audio_control_thread");
 
@@ -369,7 +379,10 @@ fn audio_control_thread(
     let source_copy = load_audio(file_path).unwrap();
     let t = Instant::now();
     let all_samples: Vec<i16> = source_copy.collect();
-    info!("Audio file loaded into memory for fft, time taken: {:?}", t.elapsed());
+    info!(
+        "Audio file loaded into memory for fft, time taken: {:?}",
+        t.elapsed()
+    );
 
     let sample_rate = source.sample_rate();
     let channels = source.channels();
@@ -384,12 +397,12 @@ fn audio_control_thread(
     *playback_position.lock().unwrap() = Duration::from_secs(0); // important cuz all that writing all_samples takes time
     info!("Audio loaded and ready to play");
 
-
     for command in receiver {
         match command {
             Command::CalculateFFT => {
                 // println!("Calculating FFT");
                 // let elapsed = last_play_time.elapsed();
+                let t1 = Instant::now();
                 let start_pos = *playback_position.lock().unwrap();
                 // println!("will this be {:?}", start_pos);
                 let samples_offset = (start_pos.as_secs_f32() * sample_rate as f32) as usize;
@@ -417,6 +430,48 @@ fn audio_control_thread(
                         "Not enough data available for FFT calculation at the current position."
                     );
                 }
+
+            //     // The data is like [ch0, ch1, ch0, ch1, ch0, ch1, ...]
+            //     // So we may need to skip some samples to get the correct channel
+            //     let samples_offset =
+            //         (start_pos.as_secs_f32() * sample_rate as f32) as usize * channels as usize;
+            //     println!("{:?}", start_pos);
+            //     if samples_offset + window_size * channels as usize <= all_samples.len() {
+            //         // De-interleave the data: collect samples for the first channel (e.g., left channel in a stereo file)
+            //         let mut buffer: Vec<Complex<f32>> = (0..window_size)
+            //             .filter_map(|i| all_samples.get(samples_offset + i * channels as usize)) // Get every 'channels'-th sample starting from 'samples_offset'
+            //             .map(|&x| Complex::new(x as f32, 0.0))
+            //             .collect();
+
+            //         if buffer.len() == window_size {
+            //             fft.process(&mut buffer); // Perform FFT in-place
+
+            //             // Display the frequency and magnitude information
+            //             display_frequencies(
+            //                 &buffer,
+            //                 sample_rate as usize,
+            //                 window_size,
+            //                 fft_output.clone(),
+            //             );
+            //         } else {
+            //             println!(
+            //                 "Insufficient samples for a complete buffer after de-interleaving."
+            //             );
+            //         }
+            //     } else {
+            //         println!(
+            //             "Not enough data available for FFT calculation at the current position."
+            //         );
+            //     }
+
+                info!("FFT Complete: Time taken to complete: {:?}", t1.elapsed());
+                let mut lock = last_fft_generated_at.lock().unwrap();
+                // if the last fft generated was at Some(instant), then we can calculate the time difference
+                if let Some(last_time) = *lock {
+                    let time_diff = Instant::now() - last_time;
+                    info!("Time since last FFT : {:?} ", time_diff);
+                }
+                *lock = Some(Instant::now());
             }
             Command::Play => {
                 println!("Playing audio");
@@ -424,7 +479,7 @@ fn audio_control_thread(
             }
             Command::Pause => {
                 println!("Pausing audio");
-                // HOW does pause work if we're not keeping track of playback_position? 
+                // HOW does pause work if we're not keeping track of playback_position?
                 // actually playback position does stop updating when paused
                 // but why?!
                 sink.pause();
