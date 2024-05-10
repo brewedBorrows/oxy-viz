@@ -1,60 +1,95 @@
 import numpy as np
-from scipy.io import wavfile
 from scipy.signal import chirp
 from scipy.io.wavfile import write
 from pydub import AudioSegment
 import os
 import shutil
 
-def generate_sine_wave(duration, frequency, sample_rate=44100):
-    """
-    Generate a sine wave.
+import numpy as np
 
-    Args:
-        duration (float): Duration of the sine wave in seconds.
-        frequency (float): Frequency of the sine wave in Hz.
-        sample_rate (int): Sampling rate (samples per second).
+def generate_sine_wave(frequency, duration, sampling_rate=44100):
+    """
+    Generate a sine wave for a given frequency.
+
+    Parameters:
+    - frequency (float): Frequency of the sine wave in Hz.
+    - duration (float): Duration of the sine wave in seconds.
+    - sampling_rate (int): Number of samples per second.
 
     Returns:
-        numpy.array: Array containing the generated sine wave.
+    - np.ndarray: Array containing the sine wave.
     """
-    t = np.linspace(0, duration, int(sample_rate * duration), endpoint=False)
-    sine_wave = np.sin(2 * np.pi * frequency * t)
-    return sine_wave
+    # Calculate the total number of samples
+    n_samples = int(sampling_rate * duration)
+    
+    # Generate an array of sample indices
+    t = np.linspace(0, duration, n_samples, endpoint=False)
+    
+    # Calculate the sine wave
+    wave = np.sin(2 * np.pi * frequency * t)
+    
+    return wave
 
-def export_as_mp3(signal, filename, sample_rate=44100):
+
+# concatanate multiple sine waves
+def concatenate_sine_waves(waves):
     """
-    Export a signal as an mp3 file.
+    Concatenate multiple sine waves into a single signal.
 
-    Args:
-        signal (numpy.array): Signal to be exported.
-        filename (str): Name of the mp3 file to be saved.
-        sample_rate (int): Sampling rate (samples per second).
+    Parameters:
+    - waves (List[np.ndarray]): List of sine waves to concatenate.
 
     Returns:
-        None
+    - np.ndarray: Array containing the concatenated signal.
     """
-    # Convert the signal to the correct format for pydub
-    signal = (signal * 32767).astype(np.int16)
+    return np.concatenate(waves)
 
-    # Write the signal to a wav file
-    write(filename + '.wav', sample_rate, signal)
+# write a wave into a wav file
+# there can be multiple channels
+# it will require N waves for each of N channels
+def write_waves_to_wav(waves, filename, sample_rate=44100):
+    """ 
+    Write a list of signals to a WAV file. Each signal will be written to a separate channel.
 
-    # Load the wav file using pydub
-    sound = AudioSegment.from_wav(filename + '.wav')
+    Parameters:
+    - waves (List[np.ndarray]): List of signals to write. Each element is an array representing a channel.
+    - filename (str): Name of the WAV file to save.
+    - sample_rate (int): Sampling rate (samples per second).
 
-    # Export the sound as an mp3 file
-    sound.export(filename + '.mp3', format="mp3")
+    Returns:
+    - None
+    """
+    # Ensure all arrays have the same length by trimming to the shortest array
+    min_length = min(map(len, waves))
+    waves = [wave[:min_length] for wave in waves]
+
+    # Convert the list of arrays to a single Numpy array with shape (n_samples, n_channels)
+    wave_array = np.stack(waves, axis=-1)
+
+    # Convert float values to a suitable 16-bit integer format
+    wave_array = np.int16(wave_array / np.max(np.abs(wave_array)) * 32767)
+
+    # Write the multi-channel data to a WAV file
+    write(filename, sample_rate, wave_array)
+
+
+def generate_scale_frequencies(base_freq=261.63, scale_steps=[0, 2, 4, 5, 7, 9, 11, 12]):
+    """
+    Generate frequencies for a musical scale based on a starting frequency.
+
+    Parameters:
+    - base_freq (float): The frequency of the base note (default is C4 - middle C).
+    - scale_steps (List[int]): Steps in the scale from the base note, in semitones.
+
+    Returns:
+    - List[float]: List of frequencies for the scale.
+    """
+    return [base_freq * (2 ** (step / 12.0)) for step in scale_steps]
+
 
 if __name__ == "__main__":
-    duration = 5  # Duration of the sine wave in seconds
-    frequency = 261.63  # Frequency of the sine wave in Hz
-    sample_rate = 44100  # Sampling rate (samples per second)
-    
-    sine_wave = generate_sine_wave(duration, frequency, sample_rate)
+    wave1 = generate_sine_wave(261.63, 5)  # C3 note, 1 second
+    wave2 = generate_sine_wave(440, 5)  # A4 note, 1 second
 
-    export_as_mp3(sine_wave, "./src/sine_wave")
-
-    # send "cargo run" to the terminal to run the code
-    command = "cargo run"
-    os.system(command)
+    # Write these waves as stereo channels to a WAV file
+    write_waves_to_wav([wave1, wave2], './src/output_stereo.wav')
