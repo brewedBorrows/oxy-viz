@@ -85,7 +85,7 @@ fn main() {
     nannou::app(model).update(update).run();
 }
 
-const SRC: &str = "src/c4_maj.wav";
+const SRC: &str = "src/output_stereo.wav";
 
 fn find_mp3_files(dir: &str) -> Vec<std::path::PathBuf> {
     WalkDir::new(dir)
@@ -392,7 +392,7 @@ fn audio_control_thread(
         let channel_index = i % channels as usize;
         all_samples_channels[channel_index].push(e);
     }
-
+    let all_samples_channels = all_samples_channels;
 
     
     info!(
@@ -425,12 +425,13 @@ fn audio_control_thread(
                 // println!("and time from start: {:?}", Instant::now()-*time_at_start);
                 // println!("TIME DIFF: {:?}", Instant::now()-*time_at_start - start_pos);
                 
-                let channel_num = 0; // only calculate fft for ch0
-                let all_samples_for_ch = &all_samples_channels[channel_num];
-
-                info!("Calculating FFT for channel: {:?}", channel_num);
-                if samples_offset + window_size <= all_samples_for_ch.len() {
-                    let mut buffer: Vec<Complex<f32>> = all_samples_for_ch
+                
+                // calculate fft for a given channel
+                let process_fft_for_channel = |channel_num: usize| {
+                    info!("Calculating FFT for channel: {:?}", channel_num);
+                    let all_samples_for_ch = &all_samples_channels[channel_num];
+                    if samples_offset + window_size <= all_samples_for_ch.len() {
+                        let mut buffer: Vec<Complex<f32>> = all_samples_for_ch
                         [samples_offset..samples_offset + window_size]
                         .iter()
                         .map(|&x| Complex::new(x as f32, 0.0))
@@ -438,7 +439,7 @@ fn audio_control_thread(
                     info!("-- sample offset {:?} window size {:?}", samples_offset, window_size);
                     // info!("-- buffer len:{:?} {:?}",buffer.len(), buffer);
                     fft.process(&mut buffer); // Perform FFT in-place
-
+                    
                     // Display the frequency and magnitude information
                     display_frequencies(
                         &buffer,
@@ -450,6 +451,42 @@ fn audio_control_thread(
                     println!(
                         "Not enough data available for FFT calculation at the current position."
                     );
+                }
+                
+            };
+            
+            let want_to_add = false; // DON"T SET TO TRUE!! DOESN"T WORKKKKKK
+            if !want_to_add {
+                // calculate for only channel 0
+                process_fft_for_channel(0);
+                }
+                else {
+                    // TODO: use the process_fft_for_channel closure here also (slight modfn needed)
+                    // add all fft result into the res_buffer
+                    let mut res_buffer = vec![Complex::new(0.0, 0.0); window_size];
+
+                    // calc fft for each buffer
+                    for i in 0..channels as usize {
+                        let all_samples_for_ch = &all_samples_channels[i];
+                        info!("Calculating FFT for channel: {:?}", i);
+                        if samples_offset + window_size <= all_samples_for_ch.len() {
+                            let mut buffer: Vec<Complex<f32>> = all_samples_for_ch
+                                [samples_offset..samples_offset + window_size]
+                                .iter()
+                                .map(|&x| Complex::new(x as f32, 0.0))
+                                .collect();
+                            fft.process(&mut buffer); // Perform FFT in-place
+                            for (j, val) in buffer.iter().enumerate() {
+                                res_buffer[j] = res_buffer[j] + val;
+                            }
+                        } else {
+                            println!(
+                                "Not enough data available for FFT calculation at the current position."
+                            );
+                        }
+                    
+                    }
+
                 }
 
             //     // The data is like [ch0, ch1, ch0, ch1, ch0, ch1, ...]
