@@ -85,7 +85,7 @@ fn main() {
     nannou::app(model).update(update).run();
 }
 
-const SRC: &str = "src/test.mp3";
+const SRC: &str = "src/scale_c_to_c.mp3";
 
 fn find_mp3_files(dir: &str) -> Vec<std::path::PathBuf> {
     WalkDir::new(dir)
@@ -101,7 +101,6 @@ struct AudioManager {
     sender_to_audio: Sender<Command>,
     playback_position: Arc<Mutex<Duration>>,
     fft_output: Arc<Mutex<Vec<Complex<f32>>>>,
-    time_at_start: Instant, // mostly useless
     mp3_files: Vec<std::path::PathBuf>,
 }
 
@@ -113,7 +112,6 @@ fn create_audio_thread() -> AudioManager {
 
     let (sender, receiver) = mpsc::channel::<Command>();
     let playback_position = Arc::new(Mutex::new(Duration::from_secs(0)));
-    let time_at_start = Instant::now();
 
     let playback_position_clone = Arc::clone(&playback_position);
     let fft_output_clone = Arc::clone(&fft_output);
@@ -124,7 +122,6 @@ fn create_audio_thread() -> AudioManager {
             receiver,
             playback_position_clone,
             fft_output_clone,
-            &time_at_start,
         )
     });
     println!("Audio thread spawned");
@@ -132,7 +129,6 @@ fn create_audio_thread() -> AudioManager {
         sender_to_audio: sender,
         playback_position,
         fft_output,
-        time_at_start,
         mp3_files,
     }
 }
@@ -157,6 +153,7 @@ fn model(app: &App) -> Model {
 
     // all the audio stuff
     let audio_manager = create_audio_thread();
+
     let sender = audio_manager.sender_to_audio;
     let playback_position = audio_manager.playback_position;
     let fft_output = audio_manager.fft_output;
@@ -348,7 +345,6 @@ fn audio_control_thread(
     receiver: Receiver<Command>,
     playback_position: Arc<Mutex<Duration>>,
     fft_output: Arc<Mutex<Vec<Complex<f32>>>>,
-    time_at_start: &Instant,
 ) {
     println!("i am in audio_control_thread");
 
@@ -385,6 +381,7 @@ fn audio_control_thread(
     let (_stream, stream_handle) = OutputStream::try_default().unwrap();
     let sink = Sink::try_new(&stream_handle).unwrap();
     sink.append(source);
+    *playback_position.lock().unwrap() = Duration::from_secs(0); // important cuz all that writing all_samples takes time
     info!("Audio loaded and ready to play");
 
 
@@ -427,6 +424,9 @@ fn audio_control_thread(
             }
             Command::Pause => {
                 println!("Pausing audio");
+                // HOW does pause work if we're not keeping track of playback_position? 
+                // actually playback position does stop updating when paused
+                // but why?!
                 sink.pause();
             }
             Command::Seek(position) => {
