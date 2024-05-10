@@ -6,6 +6,7 @@ use nannou::text::pt_to_scale;
 use rodio::{Decoder, OutputStream, Sink, Source};
 use rustfft::num_complex::Complex;
 use rustfft::FftPlanner;
+use core::time;
 use std::fs::File;
 use std::io::{BufReader, Stdout};
 use std::path::Path;
@@ -67,9 +68,8 @@ fn setup_logger(destination: LogDestination) {
             .with(fmt_layer)
             .init();
     } else {
-        let fmt_layer = fmt::layer().with_timer(fmt::time::ChronoUtc::new(String::from(
-            "%H:%M:%S%.6f",
-        )));
+        let fmt_layer =
+            fmt::layer().with_timer(fmt::time::ChronoUtc::new(String::from("%H:%M:%S%.6f")));
         tracing_subscriber::registry()
             .with(EnvFilter::new("audio_vis=info"))
             .with(fmt_layer)
@@ -85,7 +85,7 @@ fn main() {
     nannou::app(model).update(update).run();
 }
 
-const SRC: &str = "src/dodie.mp3";
+const SRC: &str = "src/test.mp3";
 
 fn find_mp3_files(dir: &str) -> Vec<std::path::PathBuf> {
     WalkDir::new(dir)
@@ -97,6 +97,46 @@ fn find_mp3_files(dir: &str) -> Vec<std::path::PathBuf> {
         .collect()
 }
 
+struct AudioManager {
+    sender_to_audio: Sender<Command>,
+    playback_position: Arc<Mutex<Duration>>,
+    fft_output: Arc<Mutex<Vec<Complex<f32>>>>,
+    time_at_start: Instant, // mostly useless
+    mp3_files: Vec<std::path::PathBuf>,
+}
+
+fn create_audio_thread() -> AudioManager {
+    let directory = "src"; // Change this to the directory you want to search
+    let mp3_files = find_mp3_files(directory);
+
+    let fft_output: Arc<Mutex<Vec<Complex<f32>>>> = Arc::new(Mutex::new(vec![]));
+
+    let (sender, receiver) = mpsc::channel::<Command>();
+    let playback_position = Arc::new(Mutex::new(Duration::from_secs(0)));
+    let time_at_start = Instant::now();
+
+    let playback_position_clone = Arc::clone(&playback_position);
+    let fft_output_clone = Arc::clone(&fft_output);
+
+    println!("this is just before stream play");
+    thread::spawn(move || {
+        audio_control_thread(
+            receiver,
+            playback_position_clone,
+            fft_output_clone,
+            &time_at_start,
+        )
+    });
+    println!("Audio thread spawned");
+    AudioManager {
+        sender_to_audio: sender,
+        playback_position,
+        fft_output,
+        time_at_start,
+        mp3_files,
+    }
+}
+
 fn model(app: &App) -> Model {
     println!("i am in model");
     app.new_window()
@@ -106,22 +146,7 @@ fn model(app: &App) -> Model {
         .build()
         .unwrap();
 
-    let directory = "src"; // Change this to the directory you want to search
-    let mp3_files = find_mp3_files(directory);
 
-    let fft_output: Arc<Mutex<Vec<Complex<f32>>>> = Arc::new(Mutex::new(vec![]));
-
-    let (sender, receiver) = mpsc::channel::<Command>();
-    let playback_position = Arc::new(Mutex::new(Duration::from_secs(0)));
-
-    let playback_position_clone = Arc::clone(&playback_position);
-    let fft_output_clone = Arc::clone(&fft_output);
-
-    println!("this is just before stream play");
-    thread::spawn(move || {
-        audio_control_thread(receiver, playback_position_clone, fft_output_clone)
-    });
-    println!("Audio thread spawned");
 
     // gen random data for testing
     let random_data = render_drawing::Data::create_random_data();
@@ -129,6 +154,13 @@ fn model(app: &App) -> Model {
     // println!("--data: {:?}", random_data);
 
     let ui_elements = ui::create_ui_elements(app.window_rect());
+
+    // all the audio stuff
+    let audio_manager = create_audio_thread();
+    let sender = audio_manager.sender_to_audio;
+    let playback_position = audio_manager.playback_position;
+    let fft_output = audio_manager.fft_output;
+    let mp3_files = audio_manager.mp3_files;
 
     Model {
         sender,
@@ -297,45 +329,55 @@ fn generate_note_frequencies(octaves: usize) -> Vec<f32> {
     frequencies
 }
 
-
-fn load_audio(file_path: &str) -> rodio::source::Amplify<rodio::source::SamplesConverter<Decoder<BufReader<File>>, i16>> {
-    let file = File::open(file_path).expect("Failed to open audio file");
+type RodioSource =
+    rodio::source::Amplify<rodio::source::SamplesConverter<Decoder<BufReader<File>>, i16>>;
+fn load_audio(file_path: &str) -> Result<RodioSource, &str> {
+    info!("Loading audio file");
+    let t = Instant::now();
+    let file = File::open(file_path).map_err(|_| "Failed to open audio file")?;
     let file = BufReader::new(file);
-    let decoder = Decoder::new(file).expect("Failed to decode audio file");
+    let decoder = Decoder::new(file).map_err(|_| "Failed to decode audio file")?;
     let source: rodio::source::Amplify<
         rodio::source::SamplesConverter<Decoder<BufReader<File>>, i16>,
     > = decoder.convert_samples::<i16>().amplify(0.25);
-    source
+    info!("Time to load audio: {:?}", t.elapsed());
+    Ok(source)
 }
 
 fn audio_control_thread(
     receiver: Receiver<Command>,
     playback_position: Arc<Mutex<Duration>>,
     fft_output: Arc<Mutex<Vec<Complex<f32>>>>,
+    time_at_start: &Instant,
 ) {
     println!("i am in audio_control_thread");
 
     let file_path = SRC;
-    let source = load_audio(file_path);
-    let file = File::open(file_path).expect("Failed to open audio file");
-    let mut decoder: MiniDecoder<BufReader<File>> = MiniDecoder::new(BufReader::new(file));
+    let source = load_audio(file_path).unwrap();
 
-    // Decode entire file into memory
-    let mut all_samples: Vec<i16> = Vec::new();
-    while let Ok(miniFrame { data, .. }) = decoder.next_frame() {
-        all_samples.extend(data);
-    }
+    // !!!!! SO USING THE SAME SOURCE SOUNDS GOOD
+    // BUT THERE'S A LONG WAIT AT START: UNCOMMENT THIS MAYBE:
 
+    // let file = File::open(file_path).expect("Failed to open audio file");
+    // let mut decoder: MiniDecoder<BufReader<File>> = MiniDecoder::new(BufReader::new(file));
 
+    // // Decode entire file into memory
+    // let mut all_samples: Vec<i16> = Vec::new();
+    // while let Ok(miniFrame { data, .. }) = decoder.next_frame() {
+    //     all_samples.extend(data);
+    // }
 
-    // we need the same decoded Vec<i16> for fft and playback
+    // we need the same decoded Vec<i16> for fft and playback (OR DO WE?)
     // source.collect() will give that vector, but it will consume source, so we'll recreate it
-    // let source_copy = load_audio(file_path);
-    // let all_samples: Vec<i16> = source_copy.collect();
-    
-    let sample_rate = 44100;
-    let channels = 2;
-    let window_size = (0.5 * sample_rate as f32) as usize * channels;
+
+    let source_copy = load_audio(file_path).unwrap();
+    let t = Instant::now();
+    let all_samples: Vec<i16> = source_copy.collect();
+    info!("Audio file loaded into memory for fft, time taken: {:?}", t.elapsed());
+
+    let sample_rate = source.sample_rate();
+    let channels = source.channels();
+    let window_size = (0.5 * sample_rate as f32) as usize * channels as usize;
 
     let mut planner = FftPlanner::new();
     let fft = planner.plan_fft_forward(window_size);
@@ -343,6 +385,8 @@ fn audio_control_thread(
     let (_stream, stream_handle) = OutputStream::try_default().unwrap();
     let sink = Sink::try_new(&stream_handle).unwrap();
     sink.append(source);
+    info!("Audio loaded and ready to play");
+
 
     for command in receiver {
         match command {
@@ -353,6 +397,8 @@ fn audio_control_thread(
                 // println!("will this be {:?}", start_pos);
                 let samples_offset = (start_pos.as_secs_f32() * sample_rate as f32) as usize;
                 println!("{:?}", start_pos);
+                // println!("and time from start: {:?}", Instant::now()-*time_at_start);
+                // println!("TIME DIFF: {:?}", Instant::now()-*time_at_start - start_pos);
                 if samples_offset + window_size <= all_samples.len() {
                     let mut buffer: Vec<Complex<f32>> = all_samples
                         [samples_offset..samples_offset + window_size]
@@ -363,7 +409,12 @@ fn audio_control_thread(
                     fft.process(&mut buffer); // Perform FFT in-place
 
                     // Display the frequency and magnitude information
-                    display_frequencies(&buffer, sample_rate, window_size, fft_output.clone());
+                    display_frequencies(
+                        &buffer,
+                        sample_rate as usize,
+                        window_size,
+                        fft_output.clone(),
+                    );
                 } else {
                     println!(
                         "Not enough data available for FFT calculation at the current position."
