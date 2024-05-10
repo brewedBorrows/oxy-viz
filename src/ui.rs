@@ -247,3 +247,46 @@ pub fn check_button_click(x: f32, y: f32, buttons: &Vec<Button>) -> Option<Butto
     }
     None
 }
+
+/// Call this in main to create buttons and other UI elements
+pub fn create_ui_elements(win: Rect) -> Vec<UIElem> {
+
+    let play_button = Button::new(
+        ButtonName::Play,
+        BBox::new(0.0, 0.0, BUTTON_W, BUTTON_W)
+            .to_bottom_center(win)
+            .translate(-BUTTON_W / 2., 0.),
+        || {
+            println!("Play button clicked");
+        },
+    );
+
+    let fav_play = Button::new(
+        ButtonName::FavPlay,
+        BBox::new(100.0, 0.0, BUTTON_W, BUTTON_W)
+            .to_bottom_right(win)
+            .translate(-PADDING, 0.),
+        || {
+            println!("Fav Record button clicked");
+        },
+    );
+
+    let fav_record = Button::new(
+        ButtonName::FavRecord,
+        BBox::new(50.0, 0.0, BUTTON_W, BUTTON_W)
+            .to_bottom_right(win)
+            .translate(-PADDING - BUTTON_W, 0.),
+        || {
+            println!("Fav Record button clicked");
+        },
+    );
+
+    let seekline = SeekLine::new(win);
+
+    vec![
+        UIElem::Button(play_button),
+        UIElem::Button(fav_record),
+        UIElem::Button(fav_play),
+        UIElem::SeekLine(seekline),
+    ]
+}

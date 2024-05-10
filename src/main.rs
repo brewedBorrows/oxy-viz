@@ -7,13 +7,17 @@ use rodio::{Decoder, OutputStream, Sink, Source};
 use rustfft::num_complex::Complex;
 use rustfft::FftPlanner;
 use std::fs::File;
-use std::io::BufReader;
+use std::io::{BufReader, Stdout};
 use std::path::Path;
 use std::sync::mpsc::{self, channel, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 use walkdir::WalkDir;
+
+use tracing::{debug, info, warn, Level};
+use tracing_appender::{non_blocking, rolling};
+use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
 mod calculation;
 mod render_drawing;
@@ -42,9 +46,42 @@ struct Model {
     mp3_files: Vec<std::path::PathBuf>,
     current_track_index: u32,
 }
+
+enum LogDestination {
+    Stdout,
+    File,
+}
+
+/// file output is not working
+fn setup_logger(destination: LogDestination) {
+    if let LogDestination::File = destination {
+        let file_appender = rolling::never(".", "output.log");
+        let (non_blocking, _guard) = tracing_appender::non_blocking(file_appender);
+        let fmt_layer = fmt::layer()
+            .with_timer(fmt::time::ChronoUtc::new(String::from(
+                "%Y-%m-%d %H:%M:%S%.6f",
+            )))
+            .with_writer(move || non_blocking.clone());
+        tracing_subscriber::registry()
+            .with(EnvFilter::new("audio_vis=info"))
+            .with(fmt_layer)
+            .init();
+    } else {
+        let fmt_layer = fmt::layer().with_timer(fmt::time::ChronoUtc::new(String::from(
+            "%H:%M:%S%.6f",
+        )));
+        tracing_subscriber::registry()
+            .with(EnvFilter::new("audio_vis=info"))
+            .with(fmt_layer)
+            .init();
+    };
+}
+
 fn main() {
-    let x = 5;
-    println!("HIII");
+    setup_logger(LogDestination::Stdout);
+
+    info!("Starting app");
+
     nannou::app(model).update(update).run();
 }
 
@@ -68,6 +105,7 @@ fn model(app: &App) -> Model {
         .view(view)
         .build()
         .unwrap();
+
     let directory = "src"; // Change this to the directory you want to search
     let mp3_files = find_mp3_files(directory);
 
@@ -90,48 +128,7 @@ fn model(app: &App) -> Model {
     let temp = 0;
     // println!("--data: {:?}", random_data);
 
-    let win = app.window_rect();
-    let BUTTON_W = ui::BUTTON_W as f32;
-    let PADDING = ui::PADDING as f32;
-
-    let play_button = ui::Button::new(
-        ui::ButtonName::Play,
-        ui::BBox::new(0.0, 0.0, BUTTON_W, BUTTON_W)
-            .to_bottom_center(win)
-            .translate(-BUTTON_W / 2., 0.),
-        || {
-            println!("Play button clicked");
-        },
-    );
-
-    let fav_play = ui::Button::new(
-        ui::ButtonName::FavPlay,
-        ui::BBox::new(100.0, 0.0, BUTTON_W, BUTTON_W)
-            .to_bottom_right(win)
-            .translate(-PADDING, 0.),
-        || {
-            println!("Fav Record button clicked");
-        },
-    );
-
-    let fav_record = ui::Button::new(
-        ui::ButtonName::FavRecord,
-        ui::BBox::new(50.0, 0.0, BUTTON_W, BUTTON_W)
-            .to_bottom_right(win)
-            .translate(-PADDING - BUTTON_W, 0.),
-        || {
-            println!("Fav Record button clicked");
-        },
-    );
-
-    let seekline = ui::SeekLine::new(win);
-
-    let ui_elements = vec![
-        ui::UIElem::Button(play_button),
-        ui::UIElem::Button(fav_record),
-        ui::UIElem::Button(fav_play),
-        ui::UIElem::SeekLine(seekline),
-    ];
+    let ui_elements = ui::create_ui_elements(app.window_rect());
 
     Model {
         sender,
@@ -196,8 +193,7 @@ fn mouse_event(app: &App, model: &mut Model, event: WindowEvent) {
                         if seekline.bbox.contains(x, y) {
                             println!("seekline clicked");
                             let new_position = seekline.get_playback_pos(x);
-                            println!("new position in percent: {:?}%", new_position*100.);
-                            
+                            println!("new position in percent: {:?}%", new_position * 100.);
                         }
                         if seekline.button.bbox.contains(x, y) {
                             println!("seekline button clicked");
@@ -254,7 +250,7 @@ fn display_frequencies(
     fft_size: usize,
     fft_output: Arc<Mutex<Vec<Complex<f32>>>>,
 ) {
-    let target_notes = generate_note_frequencies(4); // Generate frequencies for 4 octaves
+    let target_notes = generate_note_frequencies(4); // Generate frequencies for 2 octaves
     assert!(target_notes.len() == 48, "Expected 48 target notes");
 
     let mut output = fft_output.lock().expect("Mutex was poisoned").to_vec();
@@ -301,6 +297,17 @@ fn generate_note_frequencies(octaves: usize) -> Vec<f32> {
     frequencies
 }
 
+
+fn load_audio(file_path: &str) -> rodio::source::Amplify<rodio::source::SamplesConverter<Decoder<BufReader<File>>, i16>> {
+    let file = File::open(file_path).expect("Failed to open audio file");
+    let file = BufReader::new(file);
+    let decoder = Decoder::new(file).expect("Failed to decode audio file");
+    let source: rodio::source::Amplify<
+        rodio::source::SamplesConverter<Decoder<BufReader<File>>, i16>,
+    > = decoder.convert_samples::<i16>().amplify(0.25);
+    source
+}
+
 fn audio_control_thread(
     receiver: Receiver<Command>,
     playback_position: Arc<Mutex<Duration>>,
@@ -309,20 +316,23 @@ fn audio_control_thread(
     println!("i am in audio_control_thread");
 
     let file_path = SRC;
+    let source = load_audio(file_path);
     let file = File::open(file_path).expect("Failed to open audio file");
-    let mut decoder = MiniDecoder::new(BufReader::new(file));
+    let mut decoder: MiniDecoder<BufReader<File>> = MiniDecoder::new(BufReader::new(file));
 
     // Decode entire file into memory
-    let mut all_samples = Vec::new();
+    let mut all_samples: Vec<i16> = Vec::new();
     while let Ok(miniFrame { data, .. }) = decoder.next_frame() {
         all_samples.extend(data);
     }
-    let file = File::open(SRC).expect("Failed to open audio file");
-    let file = BufReader::new(file);
-    let decoder = Decoder::new(file).expect("Failed to decode audio file");
-    let source: rodio::source::Amplify<
-        rodio::source::SamplesConverter<Decoder<BufReader<File>>, i16>,
-    > = decoder.convert_samples::<i16>().amplify(0.25);
+
+
+
+    // we need the same decoded Vec<i16> for fft and playback
+    // source.collect() will give that vector, but it will consume source, so we'll recreate it
+    // let source_copy = load_audio(file_path);
+    // let all_samples: Vec<i16> = source_copy.collect();
+    
     let sample_rate = 44100;
     let channels = 2;
     let window_size = (0.5 * sample_rate as f32) as usize * channels;
