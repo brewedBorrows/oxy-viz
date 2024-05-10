@@ -85,7 +85,7 @@ fn main() {
     nannou::app(model).update(update).run();
 }
 
-const SRC: &str = "src/output_stereo.wav";
+const SRC: &str = "src/c4_maj.wav";
 
 fn find_mp3_files(dir: &str) -> Vec<std::path::PathBuf> {
     WalkDir::new(dir)
@@ -280,6 +280,8 @@ fn display_frequencies(
     fft_size: usize,
     fft_output: Arc<Mutex<Vec<Complex<f32>>>>,
 ) {
+
+    let THRESHOLD = 100.0;
     let target_notes = generate_note_frequencies(4); // Generate frequencies for 2 octaves
     assert!(target_notes.len() == 48, "Expected 48 target notes");
 
@@ -297,7 +299,7 @@ fn display_frequencies(
         let frequency = (i as f32 * sample_rate as f32) / fft_size as f32;
         let magnitude = complex.norm();
         for freq_magnitude in output.iter_mut() {
-            if (frequency - freq_magnitude.re).abs() < 1.0 && magnitude > 1.0 {
+            if (frequency - freq_magnitude.re).abs() < 1.0 && magnitude > THRESHOLD {
                 // Update the magnitude if the condition is met
                 freq_magnitude.im = magnitude;
                 break; // Stop checking once the first match is found and updated
@@ -421,7 +423,7 @@ fn audio_control_thread(
                 let start_pos = *playback_position.lock().unwrap();
                 // println!("will this be {:?}", start_pos);
                 let samples_offset = (start_pos.as_secs_f32() * sample_rate as f32) as usize;
-                println!("{:?}", start_pos);
+                println!("playback at: (based on duration since start) {:?}", start_pos);
                 // println!("and time from start: {:?}", Instant::now()-*time_at_start);
                 // println!("TIME DIFF: {:?}", Instant::now()-*time_at_start - start_pos);
                 
@@ -447,6 +449,8 @@ fn audio_control_thread(
                         window_size,
                         fft_output.clone(),
                     );
+                    let t2 = t1.elapsed() + start_pos;
+                    println!("sampled time: (based on pos in fft buffer): {:?}", t2.as_secs_f32());
                 } else {
                     println!(
                         "Not enough data available for FFT calculation at the current position."
@@ -456,6 +460,8 @@ fn audio_control_thread(
             };
             
             let want_to_add = false; // DON"T SET TO TRUE!! DOESN"T WORKKKKKK
+            let mut res_buffer: Vec<Complex<f32>> = vec![Complex::new(0.0, 0.0); window_size];
+
             if !want_to_add {
                 // calculate for only channel 0
                 process_fft_for_channel(0);
@@ -463,7 +469,6 @@ fn audio_control_thread(
                 else {
                     // TODO: use the process_fft_for_channel closure here also (slight modfn needed)
                     // add all fft result into the res_buffer
-                    let mut res_buffer = vec![Complex::new(0.0, 0.0); window_size];
 
                     // calc fft for each buffer
                     for i in 0..channels as usize {
@@ -486,6 +491,13 @@ fn audio_control_thread(
                         }
                     
                     }
+                    display_frequencies(
+                        &res_buffer,
+                        sample_rate as usize,
+                        window_size,
+                        fft_output.clone(),
+                    );
+
 
                 }
 
