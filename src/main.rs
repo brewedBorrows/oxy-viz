@@ -85,7 +85,7 @@ fn main() {
     nannou::app(model).update(update).run();
 }
 
-const SRC: &str = "src/c_major.wav";
+const SRC: &str = "src/c4_maj.wav";
 
 fn find_mp3_files(dir: &str) -> Vec<std::path::PathBuf> {
     WalkDir::new(dir)
@@ -376,24 +376,39 @@ fn audio_control_thread(
     // we need the same decoded Vec<i16> for fft and playback (OR DO WE?)
     // source.collect() will give that vector, but it will consume source, so we'll recreate it
 
+    let sample_rate = source.sample_rate();
+    let channels = source.channels();
+    
     let source_copy = load_audio(file_path).unwrap();
     let t = Instant::now();
     let all_samples: Vec<i16> = source_copy.collect();
+    // all_samples.len() must be divisible by channels
+
+    // create list of all_samples_channel_0, all_samples_channel_1, etc
+    // all samples is interleaved : [ch0 ch1 ch3 ch0 ch1 ch3 ...]
+    let mut all_samples_channels: Vec<Vec<i16>> = vec![Vec::new(); channels as usize];
+    info!("all_samples.len() {:?} should be divisibel by : {:?}", all_samples.len(), channels);
+    for (i,e) in all_samples.into_iter().enumerate() {
+        let channel_index = i % channels as usize;
+        all_samples_channels[channel_index].push(e);
+    }
+
+
+    
     info!(
         "Audio file loaded into memory for fft, time taken: {:?}",
         t.elapsed()
     );
-
-    let sample_rate = source.sample_rate();
-    let channels = source.channels();
+    
+    
     let window_size = (0.5 * sample_rate as f32) as usize * channels as usize;
-
     let mut planner = FftPlanner::new();
     let fft = planner.plan_fft_forward(window_size);
 
     let (_stream, stream_handle) = OutputStream::try_default().unwrap();
     let sink = Sink::try_new(&stream_handle).unwrap();
     sink.append(source);
+
     *playback_position.lock().unwrap() = Duration::from_secs(0); // important cuz all that writing all_samples takes time
     info!("Audio loaded and ready to play");
 
@@ -409,13 +424,19 @@ fn audio_control_thread(
                 println!("{:?}", start_pos);
                 // println!("and time from start: {:?}", Instant::now()-*time_at_start);
                 // println!("TIME DIFF: {:?}", Instant::now()-*time_at_start - start_pos);
-                if samples_offset + window_size <= all_samples.len() {
-                    let mut buffer: Vec<Complex<f32>> = all_samples
+                
+                let channel_num = 0; // only calculate fft for ch0
+                let all_samples_for_ch = &all_samples_channels[channel_num];
+
+                info!("Calculating FFT for channel: {:?}", channel_num);
+                if samples_offset + window_size <= all_samples_for_ch.len() {
+                    let mut buffer: Vec<Complex<f32>> = all_samples_for_ch
                         [samples_offset..samples_offset + window_size]
                         .iter()
                         .map(|&x| Complex::new(x as f32, 0.0))
                         .collect();
-
+                    info!("-- sample offset {:?} window size {:?}", samples_offset, window_size);
+                    // info!("-- buffer len:{:?} {:?}",buffer.len(), buffer);
                     fft.process(&mut buffer); // Perform FFT in-place
 
                     // Display the frequency and magnitude information

@@ -86,10 +86,28 @@ def generate_scale_frequencies(base_freq=261.63, scale_steps=[0, 2, 4, 5, 7, 9, 
     """
     return [base_freq * (2 ** (step / 12.0)) for step in scale_steps]
 
+def write_scale_wav():
+    sample_rate = 44100
+    note_duration = 5  # half a second per note
+
+    # Generate frequencies for the C major scale
+    frequencies = generate_scale_frequencies()
+
+    # Generate sine waves for each frequency
+    waves = [generate_sine_wave(freq, note_duration, sample_rate) for freq in frequencies]
+
+    # Concatenate all the sine waves into one long wave
+    full_scale_wave = concatenate_sine_waves(waves)
+
+    # Write the scale to a WAV file (mono since it's a single series of notes)
+    write_waves_to_wav([full_scale_wave, full_scale_wave], './src/c4_maj.wav', sample_rate)
+
 
 if __name__ == "__main__":
     wave1 = generate_sine_wave(261.63, 5)  # C3 note, 1 second
     wave2 = generate_sine_wave(440, 5)  # A4 note, 1 second
 
+
     # Write these waves as stereo channels to a WAV file
-    write_waves_to_wav([wave1, wave2], './src/output_stereo.wav')
+    write_waves_to_wav([wave1, wave1], './src/sine_wave.wav')
+    # write_scale_wav()
