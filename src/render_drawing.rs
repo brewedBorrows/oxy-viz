@@ -1,6 +1,7 @@
 use nannou::prelude::*;
 use rand::Rng;
 use splines::{Interpolation, Key, Spline};
+use tracing::{debug, info, warn, Level};
 
 use crate::ui;
 
@@ -197,10 +198,16 @@ pub trait DrawVisual {
 
 impl CircleWave {
     /// max_amp: max amplitude of the wave from the circumference of the circle
+    /// octaes: Vec<f32> of amplitudes
     pub fn new(input_data: &Data, radius: f32, max_amp: f32) -> Self {
         let (octaves, octaves_len) = (&input_data.octaves, input_data.octaves_len);
         if octaves_len > 1 {
             panic!("--CircleWave can only accept 1 octave");
+        }
+
+        // if all zeros in octave, show a warning:
+        if octaves[0].iter().all(|&amp| amp == 0.0) {
+            warn!("--All zeros in octave you want to display");
         }
 
         let norm_octave = Data::normalize(octaves[0].clone());
@@ -219,13 +226,17 @@ impl CircleWave {
                 theta: theta_list.next().unwrap(),
             })
             .collect();
-
+        
         CircleWave { points, radius }
     }
 }
 
 impl DrawVisual for CircleWave {
     fn draw_visual(&self, draw: &Draw, win: Rect, config: &DrawConfig) {
+        draw.ellipse()
+            .x_y(0 as f32, 0 as f32)
+            .radius(win.w() * 0.0125)
+            .color(RED);
         // self.scale_visual(win);
         let points = self.points.iter().map(|p| p.to_cartesian()).collect();
 
@@ -253,18 +264,40 @@ impl DrawVisual for CircleWave {
 
         // get list of spline_curve_samples from spline_generator
         let spline_samples = spline.generate_samples(config.num_samples);
+
         // println!("--spline_samples: {:?}", spline_samples);
 
+        //IDK HOW but sometimes spline_samples has Vec2(NaN, NaN) values and the program panics
+        // if that happens, don't draw the polyline!
+        if spline_samples.iter().any(|p| p.x.is_nan() || p.y.is_nan()) {
+            warn!("--spline_samples has NaN values");
+            return;
+        }
+        
+
         // draw polyline from spline_curve_samples
+
+        // test spline: draw some random points and a spline then draw it
+        // let test_points = vec![
+        //     Vec2::new(0.0, 30.0),
+        //     Vec2::new(100.0, 100.0),
+        //     Vec2::new(200.0, 50.0),
+        // ];
+
+        // let test_spline = Spline2D::new(test_points);
+        // let test_spline_samples = test_spline.generate_samples(config.num_samples);
+
+        // draw.polyline()
+        //     .color(RED)
+        //     .stroke_weight(5.0)
+        //     .points(test_spline_samples);
+
+
         draw.polyline()
             .color(RED)
             .stroke_weight(5.0)
             .points(spline_samples);
 
-        draw.ellipse()
-            .x_y(0 as f32, 0 as f32)
-            .radius(win.w() * 0.0125)
-            .color(RED);
     }
 
     fn scale_visual(&mut self, win: Rect) {

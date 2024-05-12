@@ -34,7 +34,7 @@ enum Command {
 struct Playback {
     is_playing: bool,
     curr_pos: Arc<Mutex<Duration>>,
-    fft_output: Arc<Mutex<Vec<Complex<f32>>>>,
+    fft_output: Arc<Mutex<Vec<FreqMagPair>>>,
     fav_part: Duration,
 }
 
@@ -97,10 +97,18 @@ fn find_mp3_files(dir: &str) -> Vec<std::path::PathBuf> {
         .collect()
 }
 
+/// A struct to store the frequency and magnitude of a frequency bin.
+/// To be used by the visualizer
+#[derive(Debug, Clone, Copy)]
+struct FreqMagPair {
+    freq: f32,
+    mag: f32,
+}
+
 struct AudioManager {
     sender_to_audio: Sender<Command>,
     playback_position: Arc<Mutex<Duration>>,
-    fft_output: Arc<Mutex<Vec<Complex<f32>>>>,
+    fft_output: Arc<Mutex<Vec<FreqMagPair>>>, // will use this to store the fft output -> 48 values
     last_fft_generated_at: Arc<Mutex<Option<Instant>>>, // for debugging mostly
     mp3_files: Vec<std::path::PathBuf>,
 }
@@ -109,7 +117,7 @@ fn create_audio_thread() -> AudioManager {
     let directory = "src"; // Change this to the directory you want to search
     let mp3_files = find_mp3_files(directory);
 
-    let fft_output: Arc<Mutex<Vec<Complex<f32>>>> = Arc::new(Mutex::new(vec![]));
+    let fft_output: Arc<Mutex<Vec<FreqMagPair>>> = Arc::new(Mutex::new(vec![]));
 
     let (sender, receiver) = mpsc::channel::<Command>();
     let playback_position = Arc::new(Mutex::new(Duration::from_secs(0)));
@@ -274,46 +282,68 @@ fn key_pressed(_app: &App, model: &mut Model, key: Key) {
     }
 }
 
+/// The buffer is the fft output now contains the frequency and magnitude information for each frequency bin.
+/// buffer must of single channel (any one of the channels)
 fn display_frequencies(
-    buffer: &[Complex<f32>],
+    buffer: &[Complex<f32>], // contains the actual fft_output
     sample_rate: usize,
     fft_size: usize,
-    fft_output: Arc<Mutex<Vec<Complex<f32>>>>,
+    fft_output: Arc<Mutex<Vec<FreqMagPair>>>, // will use this to store the PROCESSED fft output -> 48 values
 ) {
-
     let THRESHOLD = 100.0;
-    let target_notes = generate_note_frequencies(4); // Generate frequencies for 2 octaves
-    assert!(target_notes.len() == 48, "Expected 48 target notes");
 
-    let mut output = fft_output.lock().expect("Mutex was poisoned").to_vec();
+    assert!(
+        fft_output.lock().unwrap().len() == 48,
+        "Expected 48 target notes"
+    );
 
-    // Clear previous results
-    output.clear();
+    let mut fft_output_locked = fft_output.lock().unwrap();
 
-    for freq in &target_notes {
-        let freq_magnitude_complex = Complex::new(*freq, 0.0);
-        output.push(freq_magnitude_complex);
+    for freq_magnitude in fft_output_locked.iter_mut() {
+        freq_magnitude.mag = 0.0;
     }
 
     for (i, complex) in buffer.iter().enumerate() {
-        let frequency = (i as f32 * sample_rate as f32) / fft_size as f32;
-        let magnitude = complex.norm();
-        for freq_magnitude in output.iter_mut() {
-            if (frequency - freq_magnitude.re).abs() < 1.0 && magnitude > THRESHOLD {
-                // Update the magnitude if the condition is met
-                freq_magnitude.im = magnitude;
+        // buffer now contains the actual fft output of the audio
+        // so for each freq bin:
+        let frequency = (i as f32 * sample_rate as f32) / fft_size as f32; // frequency of the fft result at this freq bin
+        let magnitude = complex.norm(); // magnitude of the fft result at this freq bin
+                                        // iterate over the target notes and update the magnitudes
+        for FreqMagPair { freq, mag } in fft_output_locked.iter_mut() {
+            // freq is the target note's frequency
+            // mag is the magnitude of the target note from previous iteration
+            if (frequency - *freq).abs() < 1.0 && magnitude > THRESHOLD {
+                // update the target note's magnitude if
+                // the frequency in buffer is close to the target note
+                // and the magnitude is greater than the threshold
+                // info!("FOUND CANDIDATE FREQ: {:?}", frequency);
+                *mag = magnitude;
+                // THE ABOVE LINE DOES"T SEEM TO BE WORKING, BECAUSE EVEN AFTER CANDIDATE FREQ IS FOUND,
+                // AT THE END fft_output HAS ALL ZEROS
                 break; // Stop checking once the first match is found and updated
             }
         }
     }
 
-    // println!("--output: {:?}", output);
+    // is the fft_output stll containing all 0.0 mags? if yes then prolly there's some problem
+    let all_zero = fft_output_locked.iter().all(|x| x.mag == 0.0); // RETURNS TRUE
+    if all_zero {
+        warn!("-- fft output (after) has all zeros");
+    }
 
-    assert!(
-        output.len() == 48,
-        "Expected 48 output values after processing"
-    );
-    *fft_output.lock().unwrap() = output;
+    // for (i, complex) in buffer.iter().enumerate() {
+    //     let frequency = (i as f32 * sample_rate as f32) / fft_size as f32;
+    //     let magnitude = complex.norm();
+    //     for freq_magnitude in output.iter_mut() {
+    //         if (frequency - freq_magnitude.re).abs() < 1.0 && magnitude > 1.0 {
+    //             // Update the magnitude if the condition is met
+    //             freq_magnitude.im = magnitude;
+    //             break; // Stop checking once the first match is found and updated
+    //         }
+    //     }
+    // }
+
+    // println!("--output: {:?}", output);
 }
 
 fn generate_note_frequencies(octaves: usize) -> Vec<f32> {
@@ -355,7 +385,7 @@ fn load_audio(file_path: &str) -> Result<RodioSource, &str> {
 fn audio_control_thread(
     receiver: Receiver<Command>,
     playback_position: Arc<Mutex<Duration>>,
-    fft_output: Arc<Mutex<Vec<Complex<f32>>>>,
+    fft_output: Arc<Mutex<Vec<FreqMagPair>>>,
     last_fft_generated_at: Arc<Mutex<Option<Instant>>>,
 ) {
     println!("i am in audio_control_thread");
@@ -380,7 +410,7 @@ fn audio_control_thread(
 
     let sample_rate = source.sample_rate();
     let channels = source.channels();
-    
+
     let source_copy = load_audio(file_path).unwrap();
     let t = Instant::now();
     let all_samples: Vec<i16> = source_copy.collect();
@@ -389,20 +419,36 @@ fn audio_control_thread(
     // create list of all_samples_channel_0, all_samples_channel_1, etc
     // all samples is interleaved : [ch0 ch1 ch3 ch0 ch1 ch3 ...]
     let mut all_samples_channels: Vec<Vec<i16>> = vec![Vec::new(); channels as usize];
-    info!("all_samples.len() {:?} should be divisibel by : {:?}", all_samples.len(), channels);
-    for (i,e) in all_samples.into_iter().enumerate() {
+    info!(
+        "all_samples.len() {:?} should be divisibel by : {:?}",
+        all_samples.len(),
+        channels
+    );
+    for (i, e) in all_samples.into_iter().enumerate() {
         let channel_index = i % channels as usize;
         all_samples_channels[channel_index].push(e);
     }
     let all_samples_channels = all_samples_channels;
 
-    
     info!(
         "Audio file loaded into memory for fft, time taken: {:?}",
         t.elapsed()
     );
+
+    // Generate frequencies for 4 octaves
+    // this is out C4 C#4 ... etc data.
+    // TODO: Actually we need to run this only one time in the whole program,
+    // so we can move it to main or during audio setup
+    let output: Vec<FreqMagPair> = generate_note_frequencies(4)
+        .into_iter()
+        .map(|x| FreqMagPair {
+            freq: x,
+            mag: 0.0,
+        })
+        .collect();
     
-    
+    *fft_output.lock().unwrap() = output;
+
     let window_size = (0.5 * sample_rate as f32) as usize * channels as usize;
     let mut planner = FftPlanner::new();
     let fft = planner.plan_fft_forward(window_size);
@@ -423,50 +469,56 @@ fn audio_control_thread(
                 let start_pos = *playback_position.lock().unwrap();
                 // println!("will this be {:?}", start_pos);
                 let samples_offset = (start_pos.as_secs_f32() * sample_rate as f32) as usize;
-                println!("playback at: (based on duration since start) {:?}", start_pos);
+                println!(
+                    "playback at: (based on duration since start) {:?}",
+                    start_pos
+                );
                 // println!("and time from start: {:?}", Instant::now()-*time_at_start);
                 // println!("TIME DIFF: {:?}", Instant::now()-*time_at_start - start_pos);
-                
-                
+
                 // calculate fft for a given channel
                 let process_fft_for_channel = |channel_num: usize| {
                     info!("Calculating FFT for channel: {:?}", channel_num);
                     let all_samples_for_ch = &all_samples_channels[channel_num];
                     if samples_offset + window_size <= all_samples_for_ch.len() {
                         let mut buffer: Vec<Complex<f32>> = all_samples_for_ch
-                        [samples_offset..samples_offset + window_size]
-                        .iter()
-                        .map(|&x| Complex::new(x as f32, 0.0))
-                        .collect();
-                    info!("-- sample offset {:?} window size {:?}", samples_offset, window_size);
-                    // info!("-- buffer len:{:?} {:?}",buffer.len(), buffer);
-                    fft.process(&mut buffer); // Perform FFT in-place
-                    
-                    // Display the frequency and magnitude information
-                    display_frequencies(
-                        &buffer,
-                        sample_rate as usize,
-                        window_size,
-                        fft_output.clone(),
-                    );
-                    let t2 = t1.elapsed() + start_pos;
-                    println!("sampled time: (based on pos in fft buffer): {:?}", t2.as_secs_f32());
-                } else {
-                    println!(
+                            [samples_offset..samples_offset + window_size]
+                            .iter()
+                            .map(|&x| Complex::new(x as f32, 0.0))
+                            .collect();
+                        info!(
+                            "-- sample offset {:?} window size {:?}",
+                            samples_offset, window_size
+                        );
+                        // info!("-- buffer len:{:?} {:?}",buffer.len(), buffer);
+                        fft.process(&mut buffer); // Perform FFT in-place
+
+                        // Display the frequency and magnitude information
+                        display_frequencies(
+                            &buffer,
+                            sample_rate as usize,
+                            window_size,
+                            Arc::clone(&fft_output),
+                        );
+                        let t2 = t1.elapsed() + start_pos;
+                        println!(
+                            "sampled time: (based on pos in fft buffer): {:?}",
+                            t2.as_secs_f32()
+                        );
+                    } else {
+                        println!(
                         "Not enough data available for FFT calculation at the current position."
                     );
-                }
-                
-            };
-            
-            let want_to_add = false; // DON"T SET TO TRUE!! DOESN"T WORKKKKKK
-            let mut res_buffer: Vec<Complex<f32>> = vec![Complex::new(0.0, 0.0); window_size];
+                    }
+                };
 
-            if !want_to_add {
-                // calculate for only channel 0
-                process_fft_for_channel(0);
-                }
-                else {
+                let want_to_add = false; // DON"T SET TO TRUE!! DOESN"T WORKKKKKK
+                let mut res_buffer: Vec<Complex<f32>> = vec![Complex::new(0.0, 0.0); window_size];
+
+                if !want_to_add {
+                    // calculate for only channel 0
+                    process_fft_for_channel(0);
+                } else {
                     // TODO: use the process_fft_for_channel closure here also (slight modfn needed)
                     // add all fft result into the res_buffer
 
@@ -489,50 +541,47 @@ fn audio_control_thread(
                                 "Not enough data available for FFT calculation at the current position."
                             );
                         }
-                    
                     }
                     display_frequencies(
                         &res_buffer,
                         sample_rate as usize,
                         window_size,
-                        fft_output.clone(),
+                        Arc::clone(&fft_output),
                     );
-
-
                 }
 
-            //     // The data is like [ch0, ch1, ch0, ch1, ch0, ch1, ...]
-            //     // So we may need to skip some samples to get the correct channel
-            //     let samples_offset =
-            //         (start_pos.as_secs_f32() * sample_rate as f32) as usize * channels as usize;
-            //     println!("{:?}", start_pos);
-            //     if samples_offset + window_size * channels as usize <= all_samples.len() {
-            //         // De-interleave the data: collect samples for the first channel (e.g., left channel in a stereo file)
-            //         let mut buffer: Vec<Complex<f32>> = (0..window_size)
-            //             .filter_map(|i| all_samples.get(samples_offset + i * channels as usize)) // Get every 'channels'-th sample starting from 'samples_offset'
-            //             .map(|&x| Complex::new(x as f32, 0.0))
-            //             .collect();
+                //     // The data is like [ch0, ch1, ch0, ch1, ch0, ch1, ...]
+                //     // So we may need to skip some samples to get the correct channel
+                //     let samples_offset =
+                //         (start_pos.as_secs_f32() * sample_rate as f32) as usize * channels as usize;
+                //     println!("{:?}", start_pos);
+                //     if samples_offset + window_size * channels as usize <= all_samples.len() {
+                //         // De-interleave the data: collect samples for the first channel (e.g., left channel in a stereo file)
+                //         let mut buffer: Vec<Complex<f32>> = (0..window_size)
+                //             .filter_map(|i| all_samples.get(samples_offset + i * channels as usize)) // Get every 'channels'-th sample starting from 'samples_offset'
+                //             .map(|&x| Complex::new(x as f32, 0.0))
+                //             .collect();
 
-            //         if buffer.len() == window_size {
-            //             fft.process(&mut buffer); // Perform FFT in-place
+                //         if buffer.len() == window_size {
+                //             fft.process(&mut buffer); // Perform FFT in-place
 
-            //             // Display the frequency and magnitude information
-            //             display_frequencies(
-            //                 &buffer,
-            //                 sample_rate as usize,
-            //                 window_size,
-            //                 fft_output.clone(),
-            //             );
-            //         } else {
-            //             println!(
-            //                 "Insufficient samples for a complete buffer after de-interleaving."
-            //             );
-            //         }
-            //     } else {
-            //         println!(
-            //             "Not enough data available for FFT calculation at the current position."
-            //         );
-            //     }
+                //             // Display the frequency and magnitude information
+                //             display_frequencies(
+                //                 &buffer,
+                //                 sample_rate as usize,
+                //                 window_size,
+                //                 fft_output.clone(),
+                //             );
+                //         } else {
+                //             println!(
+                //                 "Insufficient samples for a complete buffer after de-interleaving."
+                //             );
+                //         }
+                //     } else {
+                //         println!(
+                //             "Not enough data available for FFT calculation at the current position."
+                //         );
+                //     }
 
                 info!("FFT Complete: Time taken to complete: {:?}", t1.elapsed());
                 let mut lock = last_fft_generated_at.lock().unwrap();
@@ -602,7 +651,7 @@ fn view(app: &App, model: &Model, frame: Frame) {
             .unwrap_or_else(|e| e.into_inner())
             .to_vec()[x.len() - 48..]
             .iter()
-            .map(|x| x.im)
+            .map(|x| x.mag)
             .collect();
 
         let octaves: Vec<Vec<f32>> = octaves_flat.chunks(12).map(|x| x.to_vec()).collect();
@@ -611,6 +660,7 @@ fn view(app: &App, model: &Model, frame: Frame) {
 
         let data = render_drawing::Data::new(octaves);
 
+        // println!("--final data before drawing: {:?}", data);
         // println!("--fft_output: {:?}", octaves_flat);
         render_drawing::draw_on_window(app, frame, &data, &model.ui_elements);
     }
